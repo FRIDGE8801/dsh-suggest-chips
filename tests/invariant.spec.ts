@@ -1,49 +1,65 @@
 /**
- * suggest-prompt invariant behavior: the companion validates this package's
- * plugin record every time it is committed through `session/event`, which
- * covers both the live `appendPluginRecord` write and the replay of an
- * already-logged record.
+ * suggest-prompt invariant behavior: the companion enforces this package's
+ * session-log prohibition — a suggestion is never written as a session event.
+ *
+ * That prohibition is the durable guarantee behind issue #4: private
+ * `SessionEventMap` types are outside the harness's closed
+ * `KNOWN_SESSION_EVENT_TYPES`, and `0.2.0-rc.2` cannot mark an appended event
+ * `ignorable`, so one such event made the whole log unreadable on cold read. The
+ * suggestion lives in this plugin's storage domain instead (see ./storage.ts),
+ * so any matching event is a regression rather than merely bad data.
  *
  * `dsh >= 0.2.0` prohibits new synchronous reads of session history, so the
- * companion no longer seeds by scanning `session.events` at install time; it
- * relies on committed delivery instead. These tests therefore exercise the
- * delivery tap (accepting a valid record, rejecting a malformed one) rather
- * than an install-time scan. The `ignorable` envelope marker is set by the
- * harness writer and is not this package's invariant to check.
- * Manual topology suites are excluded from the vitest-wide invariant host
- * (see scripts/test-invariants.ts).
+ * companion taps committed delivery instead of scanning `session.events` at
+ * install time. Manual topology suites are excluded from the vitest-wide
+ * invariant host (see scripts/test-invariants.ts).
  */
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { apply as installCompanion } from '../src/invariant.ts'
-import { SUGGEST_RECORD_TYPE } from './records.ts'
+
+/** The historical event type this package must never write again. */
+const FORBIDDEN_TYPE = 'suggest-prompt/suggested'
+/** The plugin-record spelling a 1.2.x build used. */
+const FORBIDDEN_PLUGIN_TYPE = 'plugin:suggest-prompt/suggested'
+
+/** Mount the invariant registry, session store, and this companion. */
+async function mount(): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(InvariantRegistry, { enabled: true })
+  await ctx.plugin(SessionStore)
+  await ctx.plugin({ inject: ['invariants'], apply: installCompanion })
+  return ctx
+}
 
 describe('suggest-prompt invariant companion', () => {
-  it('accepts a well-formed suggestion record committed after install', async () => {
-    const ctx = new Context()
-    await ctx.plugin(InvariantRegistry, { enabled: true })
-    await ctx.plugin(SessionStore)
-    await ctx.plugin({ inject: ['invariants'], apply: installCompanion })
-    const session = ctx.sessions.create(SessionId('valid-delivery'))
-    session.append('turn/start', { turn: 1 })
-    // A valid payload must pass the delivery tap without failing the invariant.
-    expect(() => session.append(SUGGEST_RECORD_TYPE, {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
-    })).not.toThrow()
+  it('accepts ordinary session traffic', async () => {
+    const ctx = await mount()
+    const session = ctx.sessions.create(SessionId('ordinary'))
+    expect(() => {
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    }).not.toThrow()
     await ctx.fiber.dispose()
   })
 
-  it('rejects a malformed record appended after install', async () => {
-    const ctx = new Context()
-    await ctx.plugin(InvariantRegistry, { enabled: true })
-    await ctx.plugin(SessionStore)
-    await ctx.plugin({ inject: ['invariants'], apply: installCompanion })
-    const session = ctx.sessions.create(SessionId('post-install'))
-    expect(() => session.append(SUGGEST_RECORD_TYPE, {
-      version: 1, turn: 1, baseSeq: 'x', text: '', truncated: 'y', acceptKey: 'Tab',
-    } as never)).toThrow(/invalid suggestion payload/)
+  it('rejects the private event type that broke cold reads', async () => {
+    const ctx = await mount()
+    const session = ctx.sessions.create(SessionId('forbidden'))
+    expect(() => session.append(FORBIDDEN_TYPE as never, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    } as never)).toThrow(/must not write session-log events/)
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects the plugin-record spelling as well', async () => {
+    const ctx = await mount()
+    const session = ctx.sessions.create(SessionId('forbidden-plugin'))
+    expect(() => session.append(FORBIDDEN_PLUGIN_TYPE as never, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    } as never)).toThrow(/must not write session-log events/)
     await ctx.fiber.dispose()
   })
 })

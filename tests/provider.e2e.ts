@@ -5,25 +5,40 @@ import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
-import { installTestRecordWriter } from './records.ts'
+import { createFakeDomain } from './storage.ts'
+import type { FakeStorageDomain } from './storage.ts'
 
 const contexts: Context[] = []
+const domains: FakeStorageDomain[] = []
 
 afterEach(async () => {
+  domains.length = 0
   await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose()))
 })
 
 describe.skipIf(!process.env.DEEPSEEK_API_KEY)('suggest-prompt with real DeepSeek API', () => {
   it('generates a non-empty suggestion from a real DeepSeek call', async () => {
-    // Legacy manual lane (excluded from `pnpm test`); the stand-in writer
-    // supplies the record API the pinned devDependency predates.
-    installTestRecordWriter()
+    // Legacy manual lane (excluded from `pnpm test`). The durable suggestion now
+    // lands in the plugin's own storage domain, so this lane installs the same
+    // in-memory domain double the unit lane uses instead of a record writer.
+    const domain = createFakeDomain()
+    domains.push(domain)
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(LlmDeepSeek, { thinking: 'disabled' })
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
+    await ctx.// The RPC channel registers itself as an HTTP route through `webServer`
+    await ctx.// (`connection.rpc.handle` calls `owner.webServer.register`), so the plugin
+    await ctx.// injects it and every mount must provide it.
+    await ctx.provide('webServer', { register: () => () => undefined } as never)
+    await ctx.provide('connection', {
+      rpc: { handle: () => async () => {} },
+    } as never)
+    await ctx.provide('storageDomain', {
+      open: async () => domain,
+    } as never)
     await ctx.plugin(suggestPromptPlugin, {
       maxInputBytes: 4096,
       maxOutputTokens: 64,
@@ -48,11 +63,12 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('suggest-prompt with real DeepSee
     }, { surfaceOp: 'append' })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
-    await new Promise(resolve => setTimeout(resolve, 0))
-    const suggested = session.snapshotEvents()
-      .filter(event => (event as { type: string }).type === 'plugin:suggest-prompt/suggested')
-      .map(event => (event as { data: { text: string } }).data)
-    expect(suggested).toHaveLength(1)
-    expect(suggested[0]?.text.length).toBeGreaterThan(0)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const stored = domain.records.get('real-api-suggest')
+    expect(stored).toBeDefined()
+    expect(stored?.text.length).toBeGreaterThan(0)
+    // Nothing suggestion-shaped ever enters the session log.
+    expect(session.snapshotEvents().map(event => event.type as string)
+      .filter(type => type.startsWith('suggest-prompt') || type.startsWith('plugin:'))).toEqual([])
   })
 })

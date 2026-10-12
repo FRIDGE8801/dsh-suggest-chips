@@ -1,22 +1,27 @@
 /**
- * Host-side vocabulary of the suggest-prompt domain: the durable plugin-record
- * payload and the session message-source merge. Kept separate from ./types.ts
+ * Host-side vocabulary of the suggest-prompt domain: the durable storage
+ * record and the session message-source merge. Kept separate from ./types.ts
  * (the pure client-safe outlet) because these declarations pull dsh-llm into
  * the program — the one-program-per-side layout forbids that on client
  * aggregates.
  *
- * The suggestion is persisted through `appendPluginRecord` under
- * `plugin:suggest-prompt/suggested` (see ./records.ts) — NOT as a
- * `SessionEventMap` event: private event types wedged sessions on harnesses
- * that cannot mark them ignorable (issue #4).
+ * The suggestion is persisted in this plugin's own storage domain (see
+ * ./records.ts) — NOT as a session-log write of any kind. The pre-1.2 build
+ * appended private `SessionEventMap` types, which wedged sessions on harnesses
+ * that cannot mark an appended event ignorable (issue #4); a suggestion is
+ * plugin-owned derived state and needs no place in the agent's log.
  * @module @studyzy/dsh-suggest-prompt
  */
 
 import type { SuggestPromptSuggestion } from './types.ts'
 
-/** Whole-value post-success suggestion recorded as one ignorable plugin record. */
-export interface SuggestPromptSuggested extends SuggestPromptSuggestion {
-  /** Format version of the payload. */
+/**
+ * Whole-value durable record of the latest suggestion for one session. This is
+ * the storage-domain record schema's type: a durable contract, deliberately
+ * separate from the projection value the client reads.
+ */
+export interface SuggestPromptStorageRecord extends SuggestPromptSuggestion {
+  /** Format version of the stored record. */
   readonly version: 1
 }
 

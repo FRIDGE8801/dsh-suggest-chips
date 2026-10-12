@@ -1,19 +1,22 @@
 /**
  * Suggested-next-prompt surface plugin, browser half: a conversation.input.overlay
- * bridge entry that renders the host-computed suggest-prompt projection as light
- * placeholder text INSIDE the composer textarea, plus the plugin's configuration
- * card on the WebUI **Plugins** page (provider/model for the suggestion route).
- * Projection-mode surface — the suggestion arrives through
- * `useProjection('suggestPrompt')` (seeded by the history tail page, updated by
- * session/projection frames), so this plugin owns no store, no refresh chain,
- * and no event listener; accepting a suggestion rides the standard kit's
- * `inputActions.setDraft`.
+ * bridge entry that renders the host's STORED suggestion as light placeholder
+ * text INSIDE the composer textarea, plus the plugin's configuration card on the
+ * WebUI **Plugins** page (provider/model for the suggestion route).
+ *
+ * The value arrives over this plugin's own `connection.rpc` channel — the host
+ * stores each suggestion in its own storage domain and serves it there. It is
+ * deliberately NOT a session projection: a projection advances only on a
+ * committed session event, and writing a plugin-private event type is what made
+ * sessions unreadable on cold read (issue #4). Accepting a suggestion rides the
+ * standard kit's `inputActions.setDraft`.
  *
  * The overlay and configuration registrations use the `dsh >= 0.2.0` shape: a
  * slot's `inject` callback resolves the face the entry needs, and the standard
- * session props (`useSession`, `useProjection`, `useInput`, `inputActions`)
- * arrive on the component rather than through a package-level client runtime
- * module.
+ * session props (`useSession`, `useInput`, `inputActions`, `sessionId`) arrive
+ * on the component rather than through a package-level client runtime module.
+ * The RPC face is package state, not session kit, so it is resolved once here
+ * and passed down as the `face` prop.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: declares the two Plugins-page seats this plugin registers into
@@ -29,7 +32,11 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: the ctx.locale Context merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: the ctx.connection Context merge (the RPC face this plugin calls).
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { GhostSuggestion } from './GhostSuggestion.tsx'
+import type { GhostSuggestionProps } from './GhostSuggestion.tsx'
+import type { SuggestPromptRpcFace } from './suggestion-source.ts'
 import { SettingsCard } from './SettingsCard.tsx'
 import { SuggestPromptCardController, SUGGEST_PROMPT_NS } from './settings-controller.ts'
 import type {
@@ -111,11 +118,17 @@ export const inject = ['slots']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  // The RPC face is resolved once and closed over by the cell: the overlay reads
+  // the stored suggestion from the host over `ctx.connection.rpc`, not from a
+  // session projection. `dsh-client-connection` is a type-only dependency (it
+  // is absent from the client bundle's seeded module whitelist), so the face is
+  // captured structurally and the component never names the package.
+  const face: SuggestPromptRpcFace = ctx as unknown as SuggestPromptRpcFace
   ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
     name: 'conversation.input.overlay',
     id: 'suggest-prompt',
     order: 30,
-  }, GhostSuggestion))
+  }, (props: GhostSuggestionProps) => GhostSuggestion({ ...props, face })))
 
   ctx.inject(['configForms', 'locale'], (settingsCtx) => {
     settingsCtx.effect(

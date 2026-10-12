@@ -1,5 +1,17 @@
+/**
+ * Host-half behavior of the suggest-prompt plugin.
+ *
+ * Durability moved: generation is pure (`generateSuggestion` returns the record
+ * and writes nothing) and the plugin persists through its OWN storage domain
+ * (`ctx.storageDomain.open(suggestPromptDomainSpec)`), never the session log.
+ * The pre-1.2 build appended private `suggest-prompt/…` session events, which
+ * `validateStoredEvents` refused on the next cold read (issue #4), so every
+ * assertion that used to read a suggestion out of `session.snapshotEvents()` or
+ * out of the retired `suggestPrompt` projection now reads the fake domain's
+ * `.records` Map / `.puts` counter instead.
+ */
 import { Context } from '@deepseek-ai/cordis'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import LlmRuntime, { createAssistantMessage, createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -8,7 +20,6 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
 import type { Config } from '@studyzy/dsh-suggest-prompt'
-import { applySuggestPromptProjection } from '@studyzy/dsh-suggest-prompt'
 import { apply as installCompanion } from '../src/invariant.ts'
 import {
   buildTranscript,
@@ -17,11 +28,12 @@ import {
   suggestionLanguage,
   systemPrompt,
 } from '../src/generate.ts'
-import { SUGGEST_RECORD_TYPE } from '../src/records.ts'
-import type { SuggestPromptProjection, SuggestPromptTranscriptState } from '../src/types.ts'
+import { SUGGEST_DOMAIN_NAME } from '../src/records.ts'
+import type { SuggestPromptStorageRecord } from '../src/domain.ts'
+import type { SuggestPromptSuggestion, SuggestPromptTranscriptState } from '../src/types.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from '../src/transcript.ts'
-import type { SuggestPromptSuggested } from '../src/domain.ts'
-import { installTestRecordWriter, restoreRecordWriter, suggestedRecords } from './records.ts'
+import { createFakeDomain, installFakeStorage } from './storage.ts'
+import type { FakeStorageDomain } from './storage.ts'
 
 const CONFIG = {
   maxInputBytes: 1000,
@@ -80,26 +92,63 @@ class ThrowingStringAdapter extends LlmAdapter {
 
 let contexts: Context[] = []
 
-beforeEach(() => {
-  // The pinned rc.2 devDependency has no record writer; the stand-in lets the
-  // generation flows under test persist suggestions like a dsh >= 0.2.1 host.
-  installTestRecordWriter()
-})
-
 afterEach(async () => {
-  restoreRecordWriter()
   for (const ctx of contexts) await ctx.fiber.dispose()
   contexts = []
 })
 
-async function bench(config: Config = CONFIG): Promise<Context> {
+/** The browser RPC registry the host plugin registers its read channel on. */
+interface RpcCall {
+  readonly channel: string
+  readonly endpoint: string
+  readonly payload: unknown
+}
+
+/** Minimal `ctx.connection.rpc` stand-in: records handles, answers by endpoint. */
+class RpcHostStandin {
+  readonly calls: RpcCall[] = []
+  readonly handlers = new Map<string, (endpoint: string, payload: unknown) => Promise<unknown>>()
+
+  handle(channel: string, handler: (endpoint: string, payload: unknown) => Promise<unknown>): () => Promise<void> {
+    this.handlers.set(channel, handler)
+    return async () => { this.handlers.delete(channel) }
+  }
+
+  /** Drive the registered channel exactly as the carrier would. */
+  async call(endpoint: string, payload: unknown): Promise<unknown> {
+    const handler = this.handlers.get('/suggest-prompt')
+    if (handler === undefined) throw new Error('no host handler registered for /suggest-prompt')
+    this.calls.push({ channel: '/suggest-prompt', endpoint, payload })
+    return await handler(endpoint, payload)
+  }
+}
+
+/** One mounted bench: the context, the fake store, and the RPC stand-in. */
+interface Bench {
+  readonly ctx: Context
+  readonly domain: FakeStorageDomain
+  readonly rpc: RpcHostStandin
+}
+
+/**
+ * Mount the plugin the way a real profile composes it: LLM, sessions,
+ * projections, the RPC registry, and the storage domain it declares.
+ * @param config - deployment policy handed to the plugin.
+ * @returns the context plus the fake store and RPC stand-in for assertions.
+ */
+async function bench(config: Config = CONFIG): Promise<Bench> {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
+  const rpc = new RpcHostStandin()
+  ctx.provide('webServer', { register: () => () => undefined } as never)
+  ctx.provide('connection', { rpc } as never)
+  const domain = createFakeDomain()
+  installFakeStorage(ctx, domain)
   contexts.push(ctx)
   await ctx.plugin(suggestPromptPlugin, config)
-  return ctx
+  return { ctx, domain, rpc }
 }
 
 function userMessage(text: string) {
@@ -122,8 +171,19 @@ function appendTurn(session: Session, turn: number, user: string, assistant: str
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-function suggestedEvents(session: Session): SuggestPromptSuggested[] {
-  return suggestedRecords(session)
+/** Every suggestion record the fake store holds, in insertion order. */
+function storedRecords(domain: FakeStorageDomain): SuggestPromptStorageRecord[] {
+  return [...domain.records.values()]
+}
+
+/** The stored suggestion for one session id, or undefined. */
+function storedRecord(domain: FakeStorageDomain, sessionId: string): SuggestPromptStorageRecord | undefined {
+  return domain.records.get(sessionId)
+}
+
+/** Seed the fake store with an already-durable suggestion (the reload case). */
+function seedStored(domain: FakeStorageDomain, sessionId: string, record: SuggestPromptStorageRecord): void {
+  domain.records.set(sessionId, record)
 }
 
 /**
@@ -265,8 +325,6 @@ describe('buildTranscript', () => {
   it('keeps only the newest maxRecentTurns and reports source seqs and base seq', () => {
     const session = Session.create(SessionId('recent-turns'))
     appendTurn(session, 1, '旧问题', '旧回答')
-    const secondUser = session.snapshotEvents().find(event => event.type === 'user/message')!.seq
-    void secondUser
     appendTurn(session, 2, '新问题', '新回答')
     const transcript = transcriptOf(session, 1, 500)!
     expect(transcript.pairs.map(pair => pair.text)).toEqual(['新问题', '新回答'])
@@ -333,48 +391,33 @@ describe('buildTranscript', () => {
   })
 })
 
-describe('applySuggestPromptProjection', () => {
-  it('returns the same reference for unrelated events', () => {
-    const state: SuggestPromptProjection = { turn: 1, baseSeq: 2, text: 'x', truncated: false, acceptKey: 'Tab' }
-    const event = { type: 'turn/start', data: { turn: 1 } } as never
-    expect(applySuggestPromptProjection(state, event)).toBe(state)
+describe('suggestPromptDomainSpec', () => {
+  it('is the plugin-owned durable store, one record per session', () => {
+    // The domain is what replaced the session-log record: a plugin-owned name
+    // with a per-record layout, so a write rewrites exactly one session's
+    // document and an unreadable record is skipped instead of failing the boot.
+    expect(SUGGEST_DOMAIN_NAME).toBe('suggest_prompt')
+    expect(suggestPromptPlugin.SUGGEST_RPC_CHANNEL).toBe('/suggest-prompt')
+    expect(suggestPromptPlugin.SUGGEST_RPC_GET).toBe('get')
   })
 
-  it('maps a suggested whole value, keeping route when present', () => {
-    const event = {
-      type: SUGGEST_RECORD_TYPE,
-      data: {
-        version: 1, turn: 2, baseSeq: 5, text: '继续', truncated: true,
-        route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
-      },
-    } as never
-    expect(applySuggestPromptProjection(null, event)).toEqual({
+  it('round-trips a suggestion through the wire projection', async () => {
+    const { toStoredRecord, toSuggestion } = await import('../src/records.ts')
+    const suggestion: SuggestPromptSuggestion = {
       turn: 2, baseSeq: 5, text: '继续', truncated: true,
       route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
-    })
-  })
-
-  it('maps a suggested whole value without a route', () => {
-    const event = {
-      type: SUGGEST_RECORD_TYPE,
-      data: { version: 1, turn: 2, baseSeq: 5, text: '继续', truncated: false, acceptKey: 'Tab' },
-    } as never
-    expect(applySuggestPromptProjection(null, event)).toEqual({
-      turn: 2, baseSeq: 5, text: '继续', truncated: false, acceptKey: 'Tab',
-    })
-  })
-
-  it('ignores a malformed record instead of folding garbage into the state', () => {
-    const state: SuggestPromptProjection = { turn: 1, baseSeq: 2, text: 'x', truncated: false, acceptKey: 'Tab' }
+    }
+    const record = toStoredRecord(suggestion)
+    expect(record).toEqual({ version: 1, ...suggestion })
+    expect(toSuggestion(record)).toEqual(suggestion)
     // A restored record carries whatever JSON an earlier build wrote.
-    const event = { type: SUGGEST_RECORD_TYPE, data: { version: 1, turn: 'bad' } } as never
-    expect(applySuggestPromptProjection(state, event)).toBe(state)
+    expect(toSuggestion({ version: 1, turn: 'bad' })).toBeUndefined()
   })
 })
 
 describe('suggest-prompt plugin generation', () => {
-  it('generates one suggestion per completed turn and drives the projection', async () => {
-    const ctx = await bench()
+  it('generates one suggestion per completed turn and stores it durably', async () => {
+    const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('happy-path'))
@@ -386,27 +429,61 @@ describe('suggest-prompt plugin generation', () => {
     expect(adapter.requests[0]).toMatchObject({ provider: 'main', model: 'main-model', purpose: 'suggest-prompt', maxTokens: 32 })
     expect(adapter.requests[0]?.system).toBe(systemPrompt(40, '简体中文'))
 
-    // Nothing but the ignorable suggestion record ever enters the log: the
-    // former pre-dispatch `suggest-prompt/request` events are gone (issue #4
-    // — private event types wedged sessions on cold read). On a real
-    // dsh >= 0.2.1 host the record also carries `ignorable: true`, set by the
-    // harness writer itself (not reproducible through the test stand-in).
-    const loggedTypes = session.snapshotEvents().map(event => event.type as string)
-    expect(loggedTypes.filter(type => type.startsWith('suggest-prompt'))).toEqual([])
+    // Nothing at all enters the log: the durable channel is the plugin's own
+    // storage domain, and a plugin-private session event is exactly what wedged
+    // sessions on cold read (issue #4).
+    expect(session.snapshotEvents().map(event => event.type as string)
+      .filter(type => type.startsWith('suggest-prompt') || type.startsWith('plugin:'))).toEqual([])
 
-    const suggested = suggestedEvents(session)
-    expect(suggested).toHaveLength(1)
-    expect(suggested[0]).toMatchObject({
-      turn: 1, text: '继续修复登录页', truncated: false,
-      route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
+    // One write, one record, keyed by session id and carrying the whole value.
+    expect(domain.puts).toBe(1)
+    expect([...domain.records.keys()]).toEqual(['happy-path'])
+    expect(storedRecord(domain, 'happy-path')).toEqual({
+      version: 1,
+      turn: 1,
+      baseSeq: expect.any(Number),
+      text: '继续修复登录页',
+      truncated: false,
+      route: { provider: 'main', model: 'main-model' },
+      acceptKey: 'Tab',
     })
+  })
 
-    const projection = ctx.sessionProjections.snapshot(session).values.suggestPrompt
-    expect(projection).toMatchObject({ turn: 1, text: '继续修复登录页', acceptKey: 'Tab' })
+  it('serves the stored suggestion to the browser over the plugin RPC channel', async () => {
+    const { ctx, rpc } = await bench()
+    ctx.llm.registerAdapter(['main'], new ImmediateAdapter())
+    const session = ctx.sessions.create(SessionId('rpc-read'))
+    appendTurn(session, 1, '问题', '回答')
+
+    await settle()
+
+    // Before the first suggestion the endpoint answers null, never an error:
+    // the caller is the composer, which only wants a value to render.
+    expect(await rpc.call('get', { sessionId: 'nothing-stored' }))
+      .toEqual({ ok: true, value: null })
+    expect(await rpc.call('get', { sessionId: 'rpc-read' })).toEqual({
+      ok: true,
+      value: {
+        turn: 1,
+        baseSeq: expect.any(Number),
+        text: '继续修复登录页',
+        truncated: false,
+        route: { provider: 'main', model: 'main-model' },
+        acceptKey: 'Tab',
+      },
+    })
+    // A malformed payload is answered with null rather than throwing.
+    expect(await rpc.call('get', 'not-an-object')).toEqual({ ok: true, value: null })
+    expect(await rpc.call('get', { sessionId: '' })).toEqual({ ok: true, value: null })
+    // An unknown endpoint is a real failure, not a silent null.
+    expect(await rpc.call('put', { sessionId: 'rpc-read' })).toMatchObject({
+      ok: false,
+      error: { code: 'unknown-endpoint' },
+    })
   })
 
   it('composes a partial route override with the session route', async () => {
-    const ctx = await bench({ ...CONFIG, model: 'override-model' })
+    const { ctx } = await bench({ ...CONFIG, model: 'override-model' })
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('partial-route'))
@@ -419,7 +496,7 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('uses the explicit route pair when both members are configured', async () => {
-    const ctx = await bench({ ...CONFIG, provider: 'other', model: 'other-model' })
+    const { ctx } = await bench({ ...CONFIG, provider: 'other', model: 'other-model' })
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['main', 'other'], adapter)
     const session = ctx.sessions.create(SessionId('explicit-route'))
@@ -431,20 +508,19 @@ describe('suggest-prompt plugin generation', () => {
     expect(adapter.requests[0]).toMatchObject({ provider: 'other', model: 'other-model' })
   })
 
-  it('carries the configured accept key on the suggestion event and projection', async () => {
-    const ctx = await bench({ ...CONFIG, acceptKey: 'Alt+Slash' })
+  it('carries the configured accept key on the stored record', async () => {
+    const { ctx, domain } = await bench({ ...CONFIG, acceptKey: 'Alt+Slash' })
     const adapter = new ImmediateAdapter('继续修复登录页')
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('accept-key'))
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(suggestedEvents(session)[0]?.acceptKey).toBe('Alt+Slash')
-    expect(ctx.sessionProjections.snapshot(session).values.suggestPrompt).toMatchObject({ acceptKey: 'Alt+Slash' })
+    expect(storedRecord(domain, 'accept-key')?.acceptKey).toBe('Alt+Slash')
   })
 
   it('defaults maxRecentTurns to 1, sending only the last completed turn', async () => {
-    const ctx = await bench({
+    const { ctx } = await bench({
       maxInputBytes: 1000,
       maxOutputTokens: 32,
       timeoutMs: 1000,
@@ -468,7 +544,7 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('prefers the configured provider/model pair over the logged route', async () => {
-    const ctx = await bench({ ...CONFIG, provider: 'explicit', model: 'explicit-model' })
+    const { ctx } = await bench({ ...CONFIG, provider: 'explicit', model: 'explicit-model' })
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['explicit'], adapter)
     const session = ctx.sessions.create(SessionId('explicit-route'))
@@ -479,7 +555,7 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('constrains the suggestion language to match the last user prompt', async () => {
-    const ctx = await bench()
+    const { ctx } = await bench()
     const adapter = new ImmediateAdapter('run the tests')
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('language-route'))
@@ -490,7 +566,7 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('skips turns that do not complete', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('no-complete'))
@@ -502,28 +578,56 @@ describe('suggest-prompt plugin generation', () => {
 
     await settle()
     expect(adapter.requests).toHaveLength(0)
+    expect(domain.puts).toBe(0)
   })
 
   it('never regenerates a turn whose suggestion is already durable (reload dedupe)', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('reload-dedupe'))
+    // The durable record the previous process left behind: a reload must adopt
+    // it rather than paying for the same suggestion twice. It is seeded BEFORE
+    // the first completed turn, which is when the plugin seeds its cursor.
+    seedStored(domain, 'reload-dedupe', {
+      version: 1, turn: 1, baseSeq: 4, text: '已有建议', truncated: false, acceptKey: 'Tab',
+    })
     session.append('turn/start', { turn: 1 })
     session.append('user/message', userMessage('问题'), { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 1, message: assistantMessage('回答') }, { surfaceOp: 'append' })
     session.append('request/header', { header: { config: { provider: 'main', model: 'main-model' } }, reason: 'initial' })
-    session.append(SUGGEST_RECORD_TYPE, {
-      version: 1, turn: 1, baseSeq: 4, text: '已有建议', truncated: false, acceptKey: 'Tab',
-    })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
     await settle()
+    await settle()
     expect(adapter.requests).toHaveLength(0)
+    expect(domain.puts).toBe(0)
+    // The pre-existing record is untouched, not overwritten with a fresh one.
+    expect(storedRecord(domain, 'reload-dedupe')?.text).toBe('已有建议')
+  })
+
+  it('still generates when the stored record answers an older turn', async () => {
+    // Only the turn the record answers is deduped: a newer completed turn is a
+    // new question and must be answered.
+    const { ctx, domain } = await bench()
+    const adapter = new ImmediateAdapter()
+    ctx.llm.registerAdapter(['main'], adapter)
+    const session = ctx.sessions.create(SessionId('stale-record'))
+    seedStored(domain, 'stale-record', {
+      version: 1, turn: 1, baseSeq: 4, text: '旧建议', truncated: false, acceptKey: 'Tab',
+    })
+    appendTurn(session, 1, '问题一', '回答一')
+    appendTurn(session, 2, '问题二', '回答二')
+
+    await settle()
+    await settle()
+    expect(adapter.requests).toHaveLength(1)
+    expect(storedRecord(domain, 'stale-record')?.turn).toBe(2)
+    expect(storedRecord(domain, 'stale-record')?.text).toBe('继续修复登录页')
   })
 
   it('aborts an in-flight generation when the next turn completes', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const adapter = new GatedAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('supersede'))
@@ -539,13 +643,16 @@ describe('suggest-prompt plugin generation', () => {
     adapter.release()
     await settle()
 
-    const suggested = suggestedEvents(session)
-    expect(suggested).toHaveLength(1)
-    expect(suggested[0]?.turn).toBe(2)
+    // Exactly one durable suggestion: the superseded call's write is dropped
+    // rather than resurrecting a suggestion the user already moved past.
+    expect(domain.puts).toBe(1)
+    const stored = storedRecords(domain)
+    expect(stored).toHaveLength(1)
+    expect(stored[0]?.turn).toBe(2)
   })
 
-  it('logs a warning and emits no suggestion when generation fails', async () => {
-    const ctx = await bench()
+  it('logs a warning and stores nothing when generation fails', async () => {
+    const { ctx, domain } = await bench()
     const warn = vi.spyOn(ctx.logger, 'warn')
     ctx.llm.registerAdapter(['main'], new ThrowingAdapter())
     const session = ctx.sessions.create(SessionId('failure'))
@@ -553,11 +660,28 @@ describe('suggest-prompt plugin generation', () => {
 
     await settle()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('suggest-prompt: suggestion generation failed'))
-    expect(suggestedEvents(session)).toHaveLength(0)
+    expect(domain.puts).toBe(0)
+    expect(domain.records.size).toBe(0)
+  })
+
+  it('logs a warning and stores nothing when the durable write fails', async () => {
+    const { ctx, domain } = await bench()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    ctx.llm.registerAdapter(['main'], new ImmediateAdapter())
+    domain.failWrites = new Error('medium is read-only')
+    const session = ctx.sessions.create(SessionId('write-failure'))
+    appendTurn(session, 1, '问题', '回答')
+
+    await settle()
+    await settle()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('medium is read-only'))
+    // A failed write surfaces as the generation's failure rather than leaving
+    // the caller believing the medium accepted state it never did.
+    expect(domain.records.size).toBe(0)
   })
 
   it('fails loud without a logged route and without a config pair', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const warn = vi.spyOn(ctx.logger, 'warn')
     const adapter = new ImmediateAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
@@ -570,10 +694,11 @@ describe('suggest-prompt plugin generation', () => {
     await settle()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('no complete route is available'))
     expect(adapter.requests).toHaveLength(0)
+    expect(domain.puts).toBe(0)
   })
 
   it('fails loud when the logged header carries an empty route', async () => {
-    const ctx = await bench()
+    const { ctx } = await bench()
     const warn = vi.spyOn(ctx.logger, 'warn')
     const session = ctx.sessions.create(SessionId('empty-route'))
     session.append('turn/start', { turn: 1 })
@@ -587,7 +712,7 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('drops a repeat turn/end for the same in-flight turn', async () => {
-    const ctx = await bench()
+    const { ctx } = await bench()
     const adapter = new GatedAdapter()
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('same-turn-repeat'))
@@ -602,7 +727,7 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('logs a string rejection without wrapping it', async () => {
-    const ctx = await bench()
+    const { ctx } = await bench()
     const warn = vi.spyOn(ctx.logger, 'warn')
     ctx.llm.registerAdapter(['main'], new ThrowingStringAdapter())
     const session = ctx.sessions.create(SessionId('string-failure'))
@@ -613,18 +738,18 @@ describe('suggest-prompt plugin generation', () => {
   })
 
   it('sanitizes the model output into the durable suggestion', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter('\x1b[31m"建议文本"\x1b[0m')
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('sanitized'))
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(suggestedEvents(session)[0]?.text).toBe('建议文本')
+    expect(storedRecord(domain, 'sanitized')?.text).toBe('建议文本')
   })
 
   it('silently drops a semantically rejectable suggestion', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const warn = vi.spyOn(ctx.logger, 'warn')
     const adapter = new ImmediateAdapter('no suggestion available')
     ctx.llm.registerAdapter(['main'], adapter)
@@ -632,32 +757,33 @@ describe('suggest-prompt plugin generation', () => {
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(suggestedEvents(session)).toHaveLength(0)
+    expect(domain.puts).toBe(0)
+    expect(domain.records.size).toBe(0)
     expect(warn).not.toHaveBeenCalled()
   })
 
   it('drops verbose output instead of truncating it into a cut-off suggestion', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter('很长很长的建议文本'.repeat(10))
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('verbose'))
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(suggestedEvents(session)).toHaveLength(0)
+    expect(domain.puts).toBe(0)
   })
 
   it('truncates over-cap output that still passes the semantic filter', async () => {
-    const ctx = await bench()
+    const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter(`${'a'.repeat(20)} ${'b'.repeat(20)}`)
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('truncated'))
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    const suggested = suggestedEvents(session)[0]!
-    expect(suggested.truncated).toBe(true)
-    expect(Array.from(suggested.text).length).toBe(40)
+    const stored = storedRecord(domain, 'truncated')!
+    expect(stored.truncated).toBe(true)
+    expect(Array.from(stored.text).length).toBe(40)
   })
 })
 
@@ -778,7 +904,31 @@ describe('generateSuggestion direct boundary', () => {
       new AbortController().signal,
     )
     expect(result).toBeUndefined()
-    expect(suggestedRecords(session)).toHaveLength(0)
+    // Generation is pure with respect to durability: with no usable reply there
+    // is nothing to hand back, and the session log is untouched either way.
+    expect(session.snapshotEvents().map(event => event.type as string)
+      .filter(type => type.startsWith('suggest-prompt'))).toEqual([])
+  })
+
+  it('returns the record instead of writing it, leaving persistence to the caller', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    contexts.push(ctx)
+    const adapter = new ImmediateAdapter('run the tests')
+    ctx.llm.registerAdapter(['main'], adapter)
+    const session = Session.create(SessionId('pure-generation'))
+    appendTurn(session, 1, '问题', '回答')
+    const before = session.snapshotEvents().length
+    const result = await generateSuggestion(
+      ctx,
+      resolveSuggestPromptConfig(CONFIG),
+      session,
+      1,
+      foldTranscript(session),
+      new AbortController().signal,
+    )
+    expect(result).toMatchObject({ version: 1, turn: 1, text: 'run the tests', acceptKey: 'Tab' })
+    expect(session.snapshotEvents()).toHaveLength(before)
   })
 
   it('defaults the accept key to Tab when the config omits it', async () => {
@@ -830,7 +980,7 @@ describe('generateSuggestion direct boundary', () => {
   })
 })
 
-describe('suggest-prompt durable invariant', () => {
+describe('suggest-prompt log prohibition invariant', () => {
   /** A context with the invariant registry and companion mounted over sessions. */
   async function invariantCtx(): Promise<Context> {
     const ctx = new Context()
@@ -841,28 +991,31 @@ describe('suggest-prompt durable invariant', () => {
     return ctx
   }
 
-  it('accepts a well-formed suggestion record committed after install', async () => {
+  it('accepts ordinary session traffic', async () => {
     const ctx = await invariantCtx()
-    const session = ctx.sessions.create(SessionId('inv-valid'))
-    session.append('turn/start', { turn: 1 })
-    expect(() => session.append(SUGGEST_RECORD_TYPE, {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
-    })).not.toThrow()
+    const session = ctx.sessions.create(SessionId('inv-ordinary'))
+    expect(() => {
+      session.append('turn/start', { turn: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    }).not.toThrow()
   })
 
-  it('rejects an unsupported record version', async () => {
-    const ctx = await invariantCtx()
-    const session = ctx.sessions.create(SessionId('inv-version'))
-    expect(() => session.append(SUGGEST_RECORD_TYPE, { version: 2, turn: 1 } as never))
-      .toThrow(/invalid suggestion payload/)
-  })
-
-  it('rejects a suggestion record with an invalid payload', async () => {
+  it('rejects the historical suggestion event type on commit', async () => {
+    // This is the regression that made sessions unloadable: the suggestion must
+    // live in the storage domain, never in the agent's conversation log.
     const ctx = await invariantCtx()
     const session = ctx.sessions.create(SessionId('inv-suggested'))
-    expect(() => session.append(SUGGEST_RECORD_TYPE, {
-      version: 1, turn: 1, baseSeq: 'x', text: '', truncated: 'y', acceptKey: 'Tab',
-    } as never)).toThrow(/invalid suggestion payload/)
+    expect(() => session.append('suggest-prompt/suggested' as never, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    } as never)).toThrow(/must not write session-log events/)
+  })
+
+  it('rejects the plugin-record spelling as well', async () => {
+    const ctx = await invariantCtx()
+    const session = ctx.sessions.create(SessionId('inv-plugin-record'))
+    expect(() => session.append('plugin:suggest-prompt/suggested' as never, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    } as never)).toThrow(/must not write session-log events/)
   })
 
   it('ignores foreign plugin records', async () => {
@@ -872,29 +1025,81 @@ describe('suggest-prompt durable invariant', () => {
   })
 })
 
-describe('without a harness record writer (dsh < 0.2.1)', () => {
-  it('stays dormant: warns once, never calls the LLM, never writes the log', async () => {
-    // Simulate 0.2.0-rc.2, where appendPluginRecord does not exist. The
-    // alternative — an LLM call whose only delivery channel wedges the
-    // session — is exactly the issue #4 failure this gate prevents.
-    restoreRecordWriter()
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SessionProjectionRegistry)
-    contexts.push(ctx)
-    const warn = vi.spyOn(ctx.logger, 'warn')
-    await ctx.plugin(suggestPromptPlugin, CONFIG)
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cannot persist ignorable plugin records'))
+describe('plugin mount composition', () => {
+  it('declares the services the durable store and browser endpoint need', () => {
+    // `webServer` is not optional decoration: `connection.rpc.handle` registers
+    // the channel through `owner.webServer.register(...)`, and Cordis gates that
+    // read on `inject`. Without it the plugin body throws
+    // `cannot get property "webServer" without inject`, which rolls back the
+    // session listener registered moments earlier — the plugin then goes silent
+    // with no other symptom. That was the desktop bug this pins.
+    expect(suggestPromptPlugin.inject)
+      .toEqual(['llm', 'sessions', 'storageDomain', 'connection', 'webServer'])
+    expect(suggestPromptPlugin.name).toBe('suggest-prompt')
+  })
 
-    const adapter = new ImmediateAdapter()
-    ctx.llm.registerAdapter(['main'], adapter)
-    const session = ctx.sessions.create(SessionId('dormant'))
+  it('injects webServer alongside connection, which the RPC channel reads', async () => {
+    // The desktop regression. `connection.rpc.handle` registers the channel as
+    // an HTTP route through `owner.webServer.register(...)`; in the real profile
+    // that read is inject-gated and throws
+    // `cannot get property "webServer" without inject`. The throw aborts the
+    // plugin body, so the `session/event` listener registered moments earlier is
+    // rolled back and the composer never shows ghost text — with no error the
+    // user can see anywhere.
+    //
+    // This asserts the declaration, not the failure: whether a bare `webServer`
+    // read throws depends on the live profile's isolate graph, and a unit bench
+    // that provides the service at the root cannot reproduce the gate. The
+    // declaration is the contract; the throw is its consequence.
+    expect(suggestPromptPlugin.inject).toContain('connection')
+    expect(suggestPromptPlugin.inject).toContain('webServer')
+
+    // With both declared the plugin mounts, keeps its listener, and answers.
+    const { ctx, rpc } = await bench()
+    const seen: string[] = []
+    ctx.on('session/event', (_s, event) => { seen.push(event.type) })
+    const session = ctx.sessions.create(SessionId('webserver-liveness'))
     appendTurn(session, 1, '问题', '回答')
     await settle()
+    expect(seen).toContain('turn/end')
+    expect([...rpc.handlers.keys()]).toContain(suggestPromptPlugin.SUGGEST_RPC_CHANNEL)
+  })
+
+  it('registers only the host-only transcript projection, never a client-visible one', async () => {
+    const { ctx } = await bench()
+    const session = ctx.sessions.create(SessionId('projection-keys'))
+    appendTurn(session, 1, '问题', '回答')
+    await settle()
+    // Client-visible values carry only units that declare a `wire`; the retired
+    // `suggestPrompt` projection is gone, and the host-only fold never leaves
+    // the host. `stateOf` is the host-side read face the plugin itself uses.
+    const values = ctx.sessionProjections.snapshot(session).values as Record<string, unknown>
+    expect('suggestPrompt' in values).toBe(false)
+    expect('suggestPromptTranscript' in values).toBe(false)
+    expect(ctx.sessionProjections.stateOf(session, 'suggestPromptTranscript'))
+      .toMatchObject({ lastCompletedTurn: 1 })
+  })
+
+  it('unregisters the browser endpoint when the plugin unloads', async () => {
+    const { ctx, rpc } = await bench()
+    expect(rpc.handlers.has('/suggest-prompt')).toBe(true)
+    for (const each of [...contexts]) await each.fiber.dispose()
+    expect(rpc.handlers.has('/suggest-prompt')).toBe(false)
+  })
+
+  it('mounts the generation capability without a configured route but never calls the LLM', async () => {
+    // A deployment with no provider/model runs the same code path as a session
+    // with no logged route: generation fails loud and nothing is stored.
+    const { ctx, domain } = await bench({ ...CONFIG })
+    const adapter = new ImmediateAdapter()
+    ctx.llm.registerAdapter(['main'], adapter)
+    const session = ctx.sessions.create(SessionId('no-route-bench'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', userMessage('问题'), { surfaceOp: 'append' })
+    session.append('assistant/message', { turn: 1, step: 1, message: assistantMessage('回答') }, { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await settle()
     expect(adapter.requests).toHaveLength(0)
-    expect(suggestedRecords(session)).toHaveLength(0)
-    // The projection key is absent (capability absence), not a stale null.
-    expect(ctx.sessionProjections.snapshot(session).values.suggestPrompt).toBeUndefined()
+    expect(domain.puts).toBe(0)
   })
 })

@@ -1,10 +1,16 @@
 /**
- * Suggested-next-prompt ghost text: reads the `suggestPrompt` projection and,
- * when the session is idle with an empty draft, renders the current suggestion
- * as light placeholder text INSIDE the composer (overlay slot,
- * `pointer-events: none`, so it never blocks input). Pressing the configured
- * shortcut (default `Tab`) while focus sits in the composer fills the draft
- * with the suggestion through `inputActions.setDraft`, leaving it editable.
+ * Suggested-next-prompt ghost text: reads the host's STORED suggestion over the
+ * plugin's own `connection.rpc` channel and, when the session is idle with an
+ * empty draft, renders it as light placeholder text INSIDE the composer
+ * (overlay slot, `pointer-events: none`, so it never blocks input). Pressing the
+ * configured shortcut (default `Tab`) while focus sits in the composer fills the
+ * draft with the suggestion through `inputActions.setDraft`, leaving it
+ * editable.
+ *
+ * The suggestion deliberately does NOT arrive through a session projection: a
+ * projection advances only on a committed session event, and a plugin-private
+ * event type is what made sessions unreadable on cold read (issue #4). See
+ * ./suggestion-source.ts for the storage + RPC path that replaced it.
  *
  * `dsh >= 0.2.0` note: the composer is a Lexical `contenteditable` host, not a
  * `<textarea>`, and its native placeholder is a sibling `<div>` rather than a
@@ -13,16 +19,16 @@
  */
 import { useEffect, useMemo, type CSSProperties } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: pulls the `suggestPrompt` SessionProjectionMap key merge (the
-// projection's ONE home). In-package relative reference (no package self-import).
-import type { SuggestPromptProjection } from '../types.ts'
+import type { SuggestPromptSuggestion } from '../types.ts'
 import { parseAcceptKey } from './accept-key.ts'
 import type { AcceptKeyMatcher } from './accept-key.ts'
+import { useStoredSuggestion } from './suggestion-source.ts'
+import type { SuggestPromptRpcFace } from './suggestion-source.ts'
 
 /** Full props of the overlay ghost: session standard kit (session scope). */
 export type GhostSuggestionProps = PropsRuntime<'conversation.input.overlay'>
 
-/** Fallback shortcut when the projection carries no key or the configured one is unparseable. */
+/** Fallback shortcut when the suggestion carries no key or the configured one is unparseable. */
 const DEFAULT_ACCEPT_KEY = 'Tab'
 const DEFAULT_ACCEPT_MATCHER: AcceptKeyMatcher = event => event.code === 'Tab'
   && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
@@ -98,47 +104,50 @@ function isComposerFocused(): boolean {
  * The suggestion to surface, or `undefined` when none should show.
  *
  * `dsh >= 0.2.0` removed `turnEnds` from the Session snapshot, so the client no
- * longer has a local map of completed turns to compare against. The pairing is
- * instead derived from state the host already committed: the `suggestPrompt`
- * projection carries the turn it answers, and `running` tells us whether a
- * newer turn is currently in flight. A suggestion is therefore current while
- * the agent is idle, and is hidden the moment a new turn starts (which is when
- * the stale text would otherwise linger under a fresh draft).
- * @param projection - the live `suggestPrompt` projection value.
+ * longer has a local map of completed turns to compare against. Freshness is
+ * derived from state the client does have: the stored suggestion carries the
+ * turn it answers, and `running` tells us whether a newer turn is in flight. A
+ * suggestion is therefore current while the agent is idle, and is hidden the
+ * moment a new turn starts (which is when the stale text would otherwise linger
+ * under a fresh draft).
+ * @param suggestion - the latest stored suggestion, or `null`.
  * @param running - whether the session agent is mid-turn.
  * @param draft - the current composer draft.
  * @returns the suggestion text to surface, or `undefined` to show nothing.
  */
 function currentSuggestion(
-  projection: SuggestPromptProjection | undefined,
+  suggestion: SuggestPromptSuggestion | null,
   running: boolean,
   draft: string,
 ): string | undefined {
   if (running) return undefined
-  if (projection === null || projection === undefined) return undefined
+  if (suggestion === null) return undefined
   if (draft.trim() !== '') return undefined
-  return projection.text
+  return suggestion.text
 }
 
 /**
  * Render the suggestion as placeholder text inside the composer; accept on the
  * configured shortcut (default Tab).
- * @param props - standard kit faces (session snapshot, input state, actions, projection).
+ *
+ * `face` is resolved by the slot registration (the overlay's `inject` callback)
+ * rather than read from props: the RPC face is package state, not session kit.
+ * @param props - standard session kit (session snapshot, input state, actions).
  */
 export function GhostSuggestion({
-  useSession, useInput, useProjection, inputActions,
-}: GhostSuggestionProps) {
-  const projection = useProjection('suggestPrompt')
+  useSession, useInput, inputActions, sessionId, face,
+}: GhostSuggestionProps & { readonly face: SuggestPromptRpcFace }) {
+  const suggestion = useStoredSuggestion(face, sessionId)
   const running = useSession(s => s.running)
   const draft = useInput(s => s.draft)
 
-  const text = currentSuggestion(projection, running, draft)
+  const text = currentSuggestion(suggestion, running, draft)
 
   // A malformed configured shortcut degrades to the default Tab matcher
   // instead of disabling accept entirely.
   const acceptMatcher = useMemo(
-    () => parseAcceptKey(projection?.acceptKey ?? DEFAULT_ACCEPT_KEY) ?? DEFAULT_ACCEPT_MATCHER,
-    [projection?.acceptKey],
+    () => parseAcceptKey(suggestion?.acceptKey ?? DEFAULT_ACCEPT_KEY) ?? DEFAULT_ACCEPT_MATCHER,
+    [suggestion?.acceptKey],
   )
 
   // Accept the suggestion into the draft (editable) on the configured

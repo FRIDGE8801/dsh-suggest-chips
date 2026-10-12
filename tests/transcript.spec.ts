@@ -10,14 +10,16 @@
  *   does not retain (the projection drive's `Object.is` gate depends on it);
  * - only genuine user input and assistant text are retained (harness-injected
  *   context is dropped, exactly as the previous log scan dropped it);
- * - the retained window is bounded, so a long session does not accumulate.
+ * - the retained window is bounded, so a long session does not accumulate;
+ * - NO session event carries a suggestion any more. The durable value lives in
+ *   the plugin's own storage domain, so the fold leaves `lastSuggestedTurn` at
+ *   its initial `-1` no matter what the log contains.
  */
 import { describe, expect, it } from 'vitest'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE, TRANSCRIPT_RETAINED_TURNS } from '../src/transcript.ts'
-import { SUGGEST_RECORD_TYPE } from '../src/records.ts'
 import { buildTranscript } from '../src/generate.ts'
 
 /** Fold one session's committed events into the transcript state. */
@@ -117,23 +119,33 @@ describe('applyTranscriptProjection', () => {
     expect(retained).toContain('<secret-token>')
   })
 
-  it('tracks the suggestion cursor used to dedupe across reloads', () => {
+  it('keeps the suggestion cursor untouched: the durable value is not in the log', () => {
+    // The dedupe cursor is seeded from the storage-domain record on first touch
+    // (see src/index.ts), never folded from the log — that is the whole point of
+    // moving durability off the session log. A historical suggestion record
+    // replayed into the fold must therefore leave the cursor alone rather than
+    // resurrecting the retired log-event design.
     const session = Session.create(SessionId('cursor'))
     appendTurn(session, 1, '问', '答')
     expect(fold(session).lastSuggestedTurn).toBe(-1)
-    session.append(SUGGEST_RECORD_TYPE, {
+    session.append('plugin:suggest-prompt/suggested' as never, {
       version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
-    })
-    expect(fold(session).lastSuggestedTurn).toBe(1)
+    } as never)
+    expect(fold(session).lastSuggestedTurn).toBe(-1)
   })
 
-  it('does not advance the cursor for a malformed suggestion record', () => {
-    const session = Session.create(SessionId('bad-record'))
+  it('does not retain the payload of a plugin-private suggestion record', () => {
+    // Whatever an earlier build left in the log must not leak into the retained
+    // transcript that is fed to the auxiliary call.
+    const session = Session.create(SessionId('ignored-record'))
     appendTurn(session, 1, '问', '答')
-    // A restored record carries whatever JSON an earlier build wrote; a turn
-    // it fails to mark must stay eligible for regeneration.
-    session.append(SUGGEST_RECORD_TYPE, { version: 1, turn: 'bad' } as never)
-    expect(fold(session).lastSuggestedTurn).toBe(-1)
+    const before = fold(session)
+    session.append('plugin:suggest-prompt/suggested' as never, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    } as never)
+    const after = fold(session)
+    expect(after.entries).toEqual(before.entries)
+    expect(after.lastCompletedTurn).toBe(1)
   })
 })
 

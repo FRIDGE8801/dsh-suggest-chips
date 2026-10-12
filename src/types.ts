@@ -1,26 +1,17 @@
 /**
- * Pure types of the suggest-prompt domain: the ONE home of the
- * `suggestPrompt` projection-key declaration plus the durable payload
- * vocabulary it carries, free of this package's host-side imports (cordis
- * events, dsh-llm, the plugin). Two namespace projections serve it — `./types`
- * for host consumers, `./client` (the browser half-entry re-exports these) for
- * client aggregates — with zero content duplication. Host-coupled vocabulary
- * (event payloads, message sources) lives in ./domain.ts.
+ * Pure types of the suggest-prompt domain: the shared suggestion payload and
+ * the host-only transcript fold state, free of this package's host-side imports
+ * (cordis events, dsh-llm, the plugin). The deployment {@link Config} lives on
+ * the plugin itself (`src/index.ts`) because the config catalog pastes
+ * declarations verbatim. Both runtime halves read these through one outlet —
+ * `./types` for host consumers, `./client` (the browser half-entry re-exports
+ * these) for client aggregates — with zero content duplication. Host-coupled
+ * vocabulary (storage record, message sources) lives in ./domain.ts.
  *
- * @module @studyzy/dsh-suggest-prompt/types
- */
-
-/**
- * Pure types of the suggest-prompt domain: the ONE home of the
- * `suggestPrompt` projection-key declaration plus the durable payload
- * vocabulary it carries, free of this package's host-side imports (cordis
- * events, dsh-llm, the plugin). The deployment {@link Config} lives on the
- * plugin itself (`src/index.ts`) because the config catalog pastes
- * declarations verbatim. Two namespace projections serve this outlet —
- * `./types` for host consumers, `./client` (the browser half-entry
- * re-exports these) for client aggregates — with zero content duplication.
- * Host-coupled vocabulary (event payloads, message sources) lives in
- * ./domain.ts.
+ * The suggestion is NOT a session projection. A projection advances only on a
+ * committed session event, and a plugin-private event type is what made
+ * sessions unreadable on cold read (issue #4); the value travels over this
+ * plugin's own `connection.rpc` channel instead (see ./records.ts).
  *
  * @module @studyzy/dsh-suggest-prompt/types
  */
@@ -46,10 +37,10 @@ export interface SuggestPromptSuggestion {
 }
 
 /**
- * The `suggestPrompt` projection value: the latest suggestion record's whole
- * value (`plugin:suggest-prompt/suggested`), or `null` before the first
- * suggestion. The client ghost text reads this; stale suggestions are matched
- * against the session's latest completed turn by `turn`.
+ * The value the browser read endpoint returns: the latest stored suggestion for
+ * one session, or `null` before the first suggestion. The client ghost text
+ * reads this; stale suggestions are matched against the session's latest
+ * completed turn by `turn`.
  */
 export type SuggestPromptProjection = SuggestPromptSuggestion | null
 
@@ -88,16 +79,6 @@ export interface SuggestPromptTranscriptState {
 }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionMap {
-    /**
-     * The session's latest suggested next prompt (the whole value of the
-     * newest `plugin:suggest-prompt/suggested` record), or `null` before the
-     * first suggestion. Whole-value rule: every record carries the complete
-     * post-change suggestion, so the fold is last-wins.
-     */
-    suggestPrompt: SuggestPromptProjection
-  }
-
   interface SessionProjectionStateMap {
     /**
      * Host-only transcript fold. Never client-visible: the retained text is

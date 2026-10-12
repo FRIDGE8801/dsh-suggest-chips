@@ -21,7 +21,6 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session/surface'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { isValidSuggestedPayload, suggestedRecordOf } from './records.ts'
 import type { SuggestPromptTranscriptEntry, SuggestPromptTranscriptState } from './types.ts'
 import { redactSecrets } from './sanitize.ts'
 
@@ -122,13 +121,10 @@ export function applyTranscriptProjection(
       if (entry === undefined) return state
       return { ...state, entries: [...state.entries, entry] }
     }
-    default: {
-      // Suggestion records advance the dedupe cursor. A malformed record (a
-      // restored record is owner-validated data) must not mark its turn
-      // suggested, or that turn would never regenerate.
-      const record = suggestedRecordOf(event)
-      if (record === undefined || !isValidSuggestedPayload(record)) return state
-      return { ...state, lastSuggestedTurn: record.turn }
-    }
+    default:
+      // No session event carries a suggestion any more: the durable value lives
+      // in this plugin's own storage domain, and `lastSuggestedTurn` is seeded
+      // from that record rather than folded from the log (see ./index.ts).
+      return state
   }
 }

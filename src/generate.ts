@@ -1,9 +1,10 @@
 /**
  * Bounded auxiliary suggestion generation: transcript framing, secret
  * redaction, route resolution, deadline-fused LLM dispatch, and output
- * sanitization. The suggestion is persisted as ONE ignorable plugin record
- * (see ./records.ts) — nothing else is ever written to the session log
- * (issue #4).
+ * sanitization. Generation is PURE with respect to durability: it returns the
+ * suggestion payload and the caller persists it through the plugin's own
+ * storage domain (see ./records.ts). Nothing is ever written to the session
+ * log — that is what made sessions unreadable (issue #4).
  * @module @studyzy/dsh-suggest-prompt/generate
  */
 
@@ -17,8 +18,7 @@ import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-ll
 import type { Session } from '@deepseek-ai/dsh-session'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { deadline, MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import type { SuggestPromptSuggested } from './domain.ts'
-import { appendSuggestedRecord } from './records.ts'
+import type { SuggestPromptStorageRecord } from './domain.ts'
 import { cleanSuggestion, hasCJK, sanitizeSuggestion, shouldFilterSuggestion } from './sanitize.ts'
 import type { SuggestPromptTranscriptState } from './types.ts'
 import type { Config } from './index.ts'
@@ -328,10 +328,10 @@ function finishError(finish: FinishReason): Error | undefined {
  * @param session - owning session log.
  * @param turn - completed turn whose completion this suggestion answers.
  * @param signal - cancellation forwarded to the auxiliary call.
- * @returns the durable whole-value suggestion record payload, or `undefined`
- * when the model produced no usable suggestion (an empty or semantically
- * rejectable reply — the system prompt tells it to reply with nothing when the
- * next step is not obvious). Genuine failures throw.
+ * @returns the generated suggestion payload, or `undefined` when the model
+ * produced no usable suggestion (an empty or semantically rejectable reply —
+ * the system prompt tells it to reply with nothing when the next step is not
+ * obvious). Genuine failures throw. Persisting the result is the caller's job.
  */
 export async function generateSuggestion(
   ctx: Context,
@@ -340,7 +340,7 @@ export async function generateSuggestion(
   turn: number,
   transcriptState: SuggestPromptTranscriptState,
   signal: AbortSignal,
-): Promise<SuggestPromptSuggested | undefined> {
+): Promise<SuggestPromptStorageRecord | undefined> {
   signal.throwIfAborted()
   const transcript = buildTranscript(transcriptState, config.maxRecentTurns ?? 1, config.maxTranscriptChars)
   if (transcript === undefined) {
@@ -410,7 +410,7 @@ export async function generateSuggestion(
     return undefined
   }
   const { text: suggestion, truncated } = sanitizeSuggestion(cleaned, config.maxSuggestionChars)
-  const suggested: SuggestPromptSuggested = {
+  return {
     version: 1,
     turn,
     baseSeq: transcript.baseSeq,
@@ -419,6 +419,4 @@ export async function generateSuggestion(
     route,
     acceptKey: config.acceptKey ?? 'Tab',
   }
-  appendSuggestedRecord(session, suggested)
-  return suggested
 }

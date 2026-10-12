@@ -12,7 +12,8 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
 import { Config } from '@studyzy/dsh-suggest-prompt'
-import { installTestRecordWriter, restoreRecordWriter, suggestedRecords } from './records.ts'
+import { createFakeDomain, installFakeStorage } from './storage.ts'
+import type { FakeStorageDomain } from './storage.ts'
 
 /**
  * Mirror the host's `volatileForm()` projection: walk a schema and report the
@@ -49,6 +50,8 @@ describe('suggest-prompt settings schema', () => {
 
 let root: string | undefined
 let context: Context | undefined
+/** The in-memory store the composed plugin persists into. */
+let domain: FakeStorageDomain | undefined
 
 class LoaderAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
@@ -60,14 +63,15 @@ class LoaderAdapter extends LlmAdapter {
   }
 }
 
-beforeEach(() => {
-  installTestRecordWriter()
-})
+/** Minimal `ctx.connection.rpc` stand-in for the browser read channel. */
+const rpcStandin = {
+  handle: () => async () => {},
+}
 
 afterEach(async () => {
-  restoreRecordWriter()
   await context?.fiber.dispose()
   context = undefined
+  domain = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
 })
@@ -92,6 +96,13 @@ async function loadComposition(): Promise<Context> {
 
   context = new Context()
   context.baseUrl = pathToFileURL(root).href + '/'
+  // The plugin declares `storageDomain` and `connection`; a real profile gets
+  // both from `@deepseek-ai/dsh-base`, so the composition must provide them
+  // before the entry activates.
+  domain = createFakeDomain()
+  installFakeStorage(context, domain)
+  context.provide('webServer', { register: () => () => undefined } as never)
+  context.provide('connection', { rpc: rpcStandin } as never)
   await context.plugin(Loader)
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
@@ -147,13 +158,18 @@ describe('suggest-prompt Loader composition', () => {
     expect(adapter.requests[0]).toMatchObject({ provider: 'main', model: 'main-model' })
     // `snapshotEvents()` is the sanctioned inspection reader for repository tests
     // (rc.2 removed the bare `events` accessor and prohibits new synchronous
-    // history reads in production code).
-    const suggested = suggestedRecords(session)
-    expect(suggested).toHaveLength(1)
-    expect(suggested[0]).toMatchObject({ turn: 1, text: 'Loader composed suggestion' })
-    expect(ctx.sessionProjections.snapshot(session).values.suggestPrompt).toMatchObject({
+    // history reads in production code). The suggestion must NOT appear there:
+    // durability went to the plugin's own storage domain.
+    const logged = session.snapshotEvents().map(event => event.type as string)
+    expect(logged.filter(type => type.startsWith('suggest-prompt') || type.startsWith('plugin:'))).toEqual([])
+
+    expect(domain?.puts).toBe(1)
+    expect(domain?.records.get('loader-suggest')).toMatchObject({
+      version: 1,
       turn: 1,
       text: 'Loader composed suggestion',
+      truncated: false,
+      acceptKey: 'Tab',
     })
   })
 })
