@@ -33,6 +33,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { generateSuggestion, resolveSuggestPromptConfig } from './generate.ts'
 import {
+  clearSuggestion,
   readSuggestion,
   suggestPromptDomainSpec,
   writeSuggestion,
@@ -268,6 +269,45 @@ function applyWithProjections(ctx: Context, config: Config): void {
     const resolved = resolveSuggestPromptConfig(config)
 
     /**
+     * Retire the previous turn's suggestion before generating this one.
+     *
+     * Without this the browser serves the *superseded* suggestion for the whole
+     * duration of the new generation: the composer stops hiding ghost text the
+     * moment the turn ends, the poll then reads a store that still holds the
+     * older turn's text, and only the write at the end of this function
+     * displaces it. The user sees the old prompt flash and then swap — the
+     * stale window is exactly the model's latency, which is why it reads as
+     * "about a second".
+     *
+     * Clearing is a microtask that races generation but NOT the poll: the read
+     * path stays a single awaited step of the same async chain that does the
+     * work, so a poll landing in between answers `null` ("no suggestion yet")
+     * rather than a retracted one. A cleared store is also honest about what
+     * the host knows at that instant — this turn has no suggestion yet.
+     *
+     * A failed clear is not fatal: it costs the stale flash, not correctness,
+     * and the write below still lands. It is reported once so a persistently
+     * unwritable store is not silent.
+     * @returns nothing; the clear is awaited by the caller's chain.
+     */
+    const retirePrevious = async (): Promise<void> => {
+      // Only worth a write when a record could actually be served: the cursor
+      // is seeded from the store, so a turn at or below it has nothing stale.
+      if (state.lastSuggestedTurn < 0) return
+      try {
+        const opened = await domain()
+        if (state.pending?.controller !== controller) return
+        await clearSuggestion(opened, session.id)
+      } catch (error) {
+        // Superseded clears are expected to lose their slot; only a live
+        // failure is worth reporting, and only once per turn.
+        if (state.pending?.controller !== controller) return
+        const message = error instanceof Error ? error.message : String(error)
+        ctx.logger.warn(`suggest-prompt: could not retire the previous suggestion: ${message}`)
+      }
+    }
+
+    /**
      * Whether this turn already has a durable suggestion.
      *
      * The cursor is seeded from the store, not from the log: a session reopened
@@ -340,6 +380,10 @@ function applyWithProjections(ctx: Context, config: Config): void {
       if (await alreadySuggested()) return
       // A superseding turn may have arrived while the store was read; its own
       // generation owns the slot now.
+      if (state.pending?.controller !== controller) return
+      // Retire the older turn's text before the model is called, so the store
+      // answers `null` instead of a suggestion this turn has already replaced.
+      await retirePrevious()
       if (state.pending?.controller !== controller) return
       // The transcript fold reflects every event up to and including this
       // turn/end, so reading it here yields the completed turn's messages.

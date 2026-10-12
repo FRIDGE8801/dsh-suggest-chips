@@ -31,6 +31,8 @@ export interface FakeStorageDomain {
   readonly records: Map<string, SuggestPromptStorageRecord>
   /** Count of `put` calls, to assert a write did (or did not) happen. */
   puts: number
+  /** Count of `delete` calls, to assert a stale record was retired. */
+  deletes: number
   /** Reject every `put` when set — the store-failure path. */
   failWrites?: Error
 }
@@ -44,6 +46,7 @@ export function createFakeDomain(): FakeStorageDomain {
   const state = {
     records,
     puts: 0,
+    deletes: 0,
     failWrites: undefined as Error | undefined,
   }
   const table: FakeTable = {
@@ -54,7 +57,10 @@ export function createFakeDomain(): FakeStorageDomain {
       state.puts += 1
       records.set(key, value as SuggestPromptStorageRecord)
     },
-    delete: async (key: string) => records.delete(key),
+    delete: async (key: string) => {
+      state.deletes += 1
+      return records.delete(key)
+    },
   }
   return {
     table: (name: string) => {
@@ -69,6 +75,12 @@ export function createFakeDomain(): FakeStorageDomain {
     },
     set puts(value: number) {
       state.puts = value
+    },
+    get deletes() {
+      return state.deletes
+    },
+    set deletes(value: number) {
+      state.deletes = value
     },
     get failWrites() {
       return state.failWrites
