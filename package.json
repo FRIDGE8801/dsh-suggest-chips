@@ -1,7 +1,7 @@
 {
   "name": "@studyzy/dsh-suggest-prompt",
-  "description": "为 DeepSeek Harness 开发的「建议提示词」插件：单个 bundle 集成了宿主生成插件与 Web 输入框幽灵文字界面。每个 agent 回合完成后，通过一次有界的辅助 LLM 调用生成一条建议的下一条提示词，并把它作为单条可忽略（ignorable）的插件记录写入会话日志；Web 端把它渲染为输入框内的幽灵占位文字，通过可配置的快捷键（默认 Tab）采纳进草稿。",
-  "version": "1.2.0",
+  "description": "为 DeepSeek Harness 开发的「建议提示词」插件：单个 bundle 集成了宿主生成插件与 Web 输入框幽灵文字界面。每个 agent 回合完成后，通过一次有界的辅助 LLM 调用生成一条建议的下一条提示词，存入插件自己的 storage domain，并经 /api 网关上的插件路由提供给浏览器；Web 端把它渲染为输入框内的幽灵占位文字，通过可配置的快捷键（默认 Tab）采纳进草稿。会话日志零写入。",
+  "version": "1.2.1",
   "publishConfig": {
     "access": "public"
   },
