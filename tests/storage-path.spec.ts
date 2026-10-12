@@ -1,6 +1,6 @@
 /**
  * The two seams that replaced the session-log record: the durable suggestion
- * store, and the browser read endpoint over `connection.rpc`.
+ * store, and the browser read endpoint over the plugin's `/api` route.
  *
  * These are the contracts issue #4 turned on: a suggestion must be persisted
  * somewhere that is NOT the session log, and it must still reach the composer.
@@ -25,7 +25,7 @@ import {
   suggestPromptDomainSpec,
   SUGGEST_DOMAIN_NAME,
 } from '../src/records.ts'
-import { SUGGEST_RPC_CHANNEL, SUGGEST_RPC_GET } from '../src/rpc-contract.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../src/rpc-contract.ts'
 import { createFakeDomain, installFakeStorage } from './storage.ts'
 import type { FakeStorageDomain } from './storage.ts'
 
@@ -131,7 +131,7 @@ interface Mounted {
   readonly domain: FakeStorageDomain
   readonly adapter: FixedAdapter
   /** Invoke the registered RPC handler, exactly as the transport would. */
-  call(endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { code: string } }>
+  call(sessionId: unknown): Promise<{ suggestion: unknown }>
 }
 
 let mounted: Mounted | undefined
@@ -148,14 +148,14 @@ async function mount(reply = 'run the focused suite', seed?: Record<string, unkn
   if (seed !== undefined) domain.records.set(String(seed.key), seed.value as never)
   installFakeStorage(ctx, domain)
 
-  let handler: ((endpoint: string, payload: unknown) => Promise<never>) | undefined
-  ctx.provide('webServer', { register: () => () => undefined } as never)
+  let handler: ((request: Request) => Promise<Response>) | undefined
   ctx.provide('connection', {
-    rpc: {
-      handle(channel: string, registered: typeof handler) {
-        expect(channel).toBe(SUGGEST_RPC_CHANNEL)
-        handler = registered
-        return async () => undefined
+    fetch: {
+      register(route: { path: string; methods: readonly string[]; fetch: typeof handler }) {
+        expect(route.path).toBe(SUGGEST_ROUTE_PATH)
+        expect(route.methods).toEqual([SUGGEST_ROUTE_METHOD])
+        handler = route.fetch
+        return () => undefined
       },
     },
   } as never)
@@ -180,9 +180,14 @@ async function mount(reply = 'run the focused suite', seed?: Record<string, unkn
     ctx,
     domain,
     adapter,
-    async call(endpoint, payload) {
-      if (handler === undefined) throw new Error('the plugin registered no RPC handler')
-      return await handler(endpoint, payload) as never
+    async call(sessionId) {
+      if (handler === undefined) throw new Error('the plugin registered no browser route')
+      const response = await handler(new Request(`http://localhost${SUGGEST_ROUTE_PATH}`, {
+        method: SUGGEST_ROUTE_METHOD,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      }))
+      return await response.json() as never
     },
   }
   mounted = result
@@ -236,15 +241,13 @@ describe('the browser read endpoint', () => {
   it('serves the stored suggestion for a session', async () => {
     const m = await mount()
     await writeSuggestion(m.domain as never, SessionId('sess-1'), SUGGESTION)
-    const result = await m.call(SUGGEST_RPC_GET, { sessionId: 'sess-1' })
-    expect(result.ok).toBe(true)
-    expect(result.value).toEqual(SUGGESTION)
+    const result = await m.call('sess-1')
+    expect(result.suggestion).toEqual(SUGGESTION)
   })
 
   it('answers null for a session with no suggestion', async () => {
     const m = await mount()
-    const result = await m.call(SUGGEST_RPC_GET, { sessionId: 'nothing-here' })
-    expect(result).toEqual({ ok: true, value: null })
+    expect(await m.call('nothing-here')).toEqual({ suggestion: null })
   })
 
   it('answers null for a malformed payload instead of throwing', async () => {
@@ -252,16 +255,8 @@ describe('the browser read endpoint', () => {
     // never as an error rendered where the user is typing.
     const m = await mount()
     for (const payload of [null, undefined, 'sess', 42, {}, { sessionId: '' }, { sessionId: 7 }]) {
-      const result = await m.call(SUGGEST_RPC_GET, payload)
-      expect(result).toEqual({ ok: true, value: null })
+      expect(await m.call(payload)).toEqual({ suggestion: null })
     }
-  })
-
-  it('reports an unknown endpoint as a failure', async () => {
-    const m = await mount()
-    const result = await m.call('nope', { sessionId: 's' })
-    expect(result.ok).toBe(false)
-    expect(result.error?.code).toBe('unknown-endpoint')
   })
 
   it('publishes the suggestion it just generated', async () => {
@@ -269,8 +264,8 @@ describe('the browser read endpoint', () => {
     completedTurn(m.ctx, 'live')
     await flush()
     expect(m.adapter.requests).toHaveLength(1)
-    const result = await m.call(SUGGEST_RPC_GET, { sessionId: 'live' })
-    expect(result.value).toMatchObject({ turn: 1, text: 'run the focused suite' })
+    const result = await m.call('live')
+    expect(result.suggestion).toMatchObject({ turn: 1, text: 'run the focused suite' })
   })
 })
 

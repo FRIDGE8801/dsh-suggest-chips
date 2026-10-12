@@ -63,9 +63,9 @@ class LoaderAdapter extends LlmAdapter {
   }
 }
 
-/** Minimal `ctx.connection.rpc` stand-in for the browser read channel. */
-const rpcStandin = {
-  handle: () => async () => {},
+/** Minimal `ctx.connection.fetch` stand-in for the browser read route. */
+const routeStandin = {
+  register: () => () => {},
 }
 
 afterEach(async () => {
@@ -101,8 +101,7 @@ async function loadComposition(): Promise<Context> {
   // before the entry activates.
   domain = createFakeDomain()
   installFakeStorage(context, domain)
-  context.provide('webServer', { register: () => () => undefined } as never)
-  context.provide('connection', { rpc: rpcStandin } as never)
+  context.provide('connection', { fetch: routeStandin } as never)
   await context.plugin(Loader)
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([

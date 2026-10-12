@@ -23,7 +23,6 @@ import type { SuggestPromptSuggestion } from '../types.ts'
 import { parseAcceptKey } from './accept-key.ts'
 import type { AcceptKeyMatcher } from './accept-key.ts'
 import { useStoredSuggestion } from './suggestion-source.ts'
-import type { SuggestPromptRpcFace } from './suggestion-source.ts'
 
 /** Full props of the overlay ghost: session standard kit (session scope). */
 export type GhostSuggestionProps = PropsRuntime<'conversation.input.overlay'>
@@ -130,14 +129,12 @@ function currentSuggestion(
  * Render the suggestion as placeholder text inside the composer; accept on the
  * configured shortcut (default Tab).
  *
- * `face` is resolved by the slot registration (the overlay's `inject` callback)
- * rather than read from props: the RPC face is package state, not session kit.
  * @param props - standard session kit (session snapshot, input state, actions).
  */
 export function GhostSuggestion({
-  useSession, useInput, inputActions, sessionId, face,
-}: GhostSuggestionProps & { readonly face: SuggestPromptRpcFace }) {
-  const suggestion = useStoredSuggestion(face, sessionId)
+  useSession, useInput, inputActions, sessionId,
+}: GhostSuggestionProps) {
+  const suggestion = useStoredSuggestion(sessionId)
   const running = useSession(s => s.running)
   const draft = useInput(s => s.draft)
 

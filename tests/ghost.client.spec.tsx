@@ -19,8 +19,7 @@ import type { ConversationSnapshot, SessionId } from '@deepseek-ai/dsh-client-ru
 import { GhostSuggestion } from '../src/browser/GhostSuggestion.tsx'
 import type { GhostSuggestionProps } from '../src/browser/GhostSuggestion.tsx'
 import { POLL_INTERVAL_MS } from '../src/browser/suggestion-source.ts'
-import type { SuggestPromptRpcFace } from '../src/browser/suggestion-source.ts'
-import { SUGGEST_RPC_CHANNEL, SUGGEST_RPC_GET } from '../src/rpc-contract.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../src/rpc-contract.ts'
 import type { SuggestPromptSuggestion } from '../src/types.ts'
 
 afterEach(cleanup)
@@ -35,53 +34,57 @@ const SUGGESTION: SuggestPromptSuggestion = {
   acceptKey: 'Tab',
 }
 
-/** One recorded call into the fake RPC face. */
+/** One recorded call into the plugin's fetch route. */
 interface Call {
-  readonly channel: string
-  readonly endpoint: string
+  readonly path: string
+  readonly method: string
   readonly payload: unknown
 }
 
 /**
- * A structural `SuggestPromptRpcFace`: records every call and answers with the
- * value (or failure) the test configured. Deliberately not a mock of
- * `dsh-client-connection` — that package is a type-only dependency and is
- * absent from the client bundle's module whitelist.
+ * Stub the plugin's own `/api` route and record what the component asked for.
+ *
+ * The browser half deliberately uses a plain `fetch` rather than an RPC client:
+ * the host cannot register an `rpc.handle` channel at all (that surface reads
+ * `webServer` on the connection service's own fiber, which never injects it), so
+ * there is no face object to fake here.
  */
-function fakeFace(answer: { value?: unknown; ok?: boolean; reject?: Error } = {}) {
+function fakeFetch(answer: { value?: unknown; status?: number; reject?: Error } = {}) {
   const calls: Call[] = []
-  const face: SuggestPromptRpcFace = {
-    connection: {
-      rpc: {
-        call: async (channel, endpoint, payload) => {
-          calls.push({ channel, endpoint, payload })
-          if (answer.reject !== undefined) throw answer.reject
-          return { ok: answer.ok ?? true, value: answer.value ?? null }
-        },
-      },
-    },
-  }
-  return { face, calls }
+  const original = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({
+      path: String(input),
+      method: init?.method ?? 'GET',
+      payload: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+    })
+    if (answer.reject !== undefined) throw answer.reject
+    const status = answer.status ?? 200
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => ({ suggestion: answer.value ?? null }),
+    } as unknown as Response
+  }) as typeof fetch
+  return { calls, restore: () => { globalThis.fetch = original } }
 }
 
 function kit(over: {
   running?: boolean
   draft?: string
   suggestion?: SuggestPromptSuggestion | null
-  face?: SuggestPromptRpcFace
-  calls?: Call[]
+  answer?: { value?: unknown; status?: number; reject?: Error }
 } = {}) {
   const setDraft = vi.fn()
   const session = { running: over.running ?? false }
-  const rpc = over.face === undefined ? fakeFace({ value: over.suggestion ?? null }) : { face: over.face, calls: over.calls ?? [] }
+  const net = fakeFetch(over.answer ?? { value: over.suggestion ?? null })
   const props = {
     sessionId: SID,
     useSession: (selector: (s: ConversationSnapshot) => unknown) => selector(session as ConversationSnapshot),
     useInput: (selector: (s: { draft: string }) => unknown) => selector({ draft: over.draft ?? '' }),
     inputActions: { setDraft },
-    face: rpc.face,
   } as unknown as GhostSuggestionProps
-  return { setDraft, props, calls: rpc.calls, face: rpc.face }
+  return { setDraft, props, calls: net.calls, restore: net.restore }
 }
 
 /** The rendered ghost layer element, or null when no ghost shows. */
@@ -148,17 +151,20 @@ describe('GhostSuggestion bridge', () => {
     await waitFor(() => { expect(ghostText()).toBe('继续修复登录页') })
   })
 
-  it('reads the suggestion over the plugin-owned RPC channel for its own session', async () => {
+  it('reads the suggestion from the plugin-owned route for its own session', async () => {
     const { props, calls } = kit({ suggestion: SUGGESTION })
     await renderGhost(props)
     await waitFor(() => { expect(calls.length).toBeGreaterThan(0) })
     expect(calls[0]).toEqual({
-      channel: SUGGEST_RPC_CHANNEL,
-      endpoint: SUGGEST_RPC_GET,
+      path: SUGGEST_ROUTE_PATH,
+      method: SUGGEST_ROUTE_METHOD,
       payload: { sessionId: SID },
     })
-    expect(SUGGEST_RPC_CHANNEL).toBe('/suggest-prompt')
-    expect(SUGGEST_RPC_GET).toBe('get')
+    // The path must sit under `/api`: `assertFetchRoute` rejects anything else,
+    // and the shared gateway only dispatches exact paths it has registered.
+    expect(SUGGEST_ROUTE_PATH).toBe('/api/suggest-prompt')
+    expect(SUGGEST_ROUTE_PATH.startsWith('/api/')).toBe(true)
+    expect(SUGGEST_ROUTE_METHOD).toBe('POST')
   })
 
   it('renders nothing while the agent is running', async () => {
@@ -201,15 +207,13 @@ describe('GhostSuggestion bridge', () => {
 
   it('degrades to no suggestion when the read fails', async () => {
     // A broken read must not surface an error where the user is typing.
-    const { face } = fakeFace({ reject: new Error('transport is down') })
-    const { props } = kit({ face })
+    const { props } = kit({ answer: { reject: new Error('transport is down') } })
     await renderGhost(props)
     expect(ghostLayer()).toBeNull()
   })
 
   it('degrades to no suggestion when the endpoint reports failure', async () => {
-    const { face } = fakeFace({ ok: false })
-    const { props } = kit({ face })
+    const { props } = kit({ answer: { status: 500 } })
     await renderGhost(props)
     expect(ghostLayer()).toBeNull()
   })
@@ -217,11 +221,17 @@ describe('GhostSuggestion bridge', () => {
   it('polls for a suggestion that lands after mount', async () => {
     vi.useFakeTimers()
     try {
-      let stored: SuggestPromptSuggestion | null = null
-      const face: SuggestPromptRpcFace = {
-        connection: { rpc: { call: async () => ({ ok: true, value: stored }) } },
-      }
-      const { props } = kit({ face })
+      // Install the stub AFTER `kit()`: the kit builds its own fetch stub, so
+      // stubbing first would be overwritten and the poll would never see the
+      // value change.
+      const { props } = kit()
+      let stored: unknown = null
+      const original = globalThis.fetch
+      globalThis.fetch = (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ suggestion: stored }),
+      }) as unknown as Response) as typeof fetch
       render(<GhostSuggestion {...props} />)
       await act(async () => { await Promise.resolve() })
       expect(ghostLayer()).toBeNull()
@@ -229,8 +239,12 @@ describe('GhostSuggestion bridge', () => {
       // The host writes the suggestion after the turn settles, which is after
       // this component mounted — the bounded poll is what surfaces it.
       stored = SUGGESTION
+      // Two ticks: the first fires the poll, and flushing its resolved promise
+      // (which the component's `.then` awaits) is what re-renders with the text.
+      await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS) })
       await act(async () => { await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS) })
       expect(ghostText()).toBe('继续修复登录页')
+      globalThis.fetch = original
     } finally {
       vi.useRealTimers()
     }

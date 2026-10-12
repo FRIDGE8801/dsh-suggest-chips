@@ -40,7 +40,7 @@ import {
 import type { SuggestPromptDomain } from './records.ts'
 import type { SuggestPromptStorageRecord } from './domain.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from './transcript.ts'
-import { SUGGEST_RPC_CHANNEL, SUGGEST_RPC_GET } from './rpc-contract.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from './rpc-contract.ts'
 import type { SuggestPromptSuggestion, SuggestPromptTranscriptState } from './types.ts'
 
 // The pure payload outlet (./types.ts, ONE home of the `suggestPrompt`
@@ -54,7 +54,7 @@ export type * from './domain.ts'
  * The browser-facing RPC channel this plugin owns. Absolute by contract
  * (`/^\/[A-Za-z0-9._~-]+$/`), and never the reserved `/api`.
  */
-export { SUGGEST_RPC_CHANNEL, SUGGEST_RPC_GET }
+export { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH }
 
 /** Persisted-state schema of the host-only `suggestPromptTranscript` fold. */
 const transcriptStateSchema: ZodType<SuggestPromptTranscriptState> = zod.object({
@@ -147,16 +147,17 @@ export const name = 'suggest-prompt'
 /**
  * Services required before this plugin activates. `storageDomain` is the
  * durable suggestion store (`@deepseek-ai/dsh-base` mounts it, so it is present
- * in every profile); `connection` is the browser RPC registry, and `webServer`
- * is required BESIDE it: `connection.rpc.handle()` registers the channel as an
- * HTTP route through `owner.webServer.register(...)`, resolved on the calling
- * context. Omitting `webServer` makes `rpc.handle(...)` throw
- * `cannot get property "webServer" without inject` — which aborts the whole
- * plugin body, so the session listener registered moments earlier is rolled
- * back and the plugin goes silent with no other symptom. The harness's own
- * `dsh-host-frontend-static` injects the same pair for the same reason.
+ * in every profile); `connection` carries the shared `/api` gateway this
+ * plugin's browser route hangs off.
+ *
+ * `webServer` is deliberately NOT here. The plugin never touches it: it
+ * registers through `connection.fetch.register`, which writes only to the
+ * connection service's own route table. The sibling surface `rpc.handle` does
+ * read `owner.webServer`, but on the *connection* fiber — which injects neither
+ * `webServer` nor anything that provides it — so that call throws there
+ * regardless of this plugin's own list. See `SUGGEST_ROUTE_PATH`.
  */
-export const inject = ['llm', 'sessions', 'storageDomain', 'connection', 'webServer']
+export const inject = ['llm', 'sessions', 'storageDomain', 'connection']
 
 /**
  * Settings namespace of the suggestion route. `dsh >= 0.2.0` keys a plugin's
@@ -228,6 +229,26 @@ function applyWithProjections(ctx: Context, config: Config): void {
   /** The retained transcript fold for one session. */
   const transcriptStateOf = (session: Session): SuggestPromptTranscriptState =>
     ctx.sessionProjections.stateOf(session, 'suggestPromptTranscript') ?? EMPTY_TRANSCRIPT_STATE
+
+  /**
+   * Answer one browser read. Every failure mode resolves to `null` rather than
+   * throwing: the caller is the composer, which renders "no suggestion" for an
+   * absent value and nothing at all for an error.
+   * @param request - the buffered POST the browser sent.
+   * @returns the stored suggestion, or `null` when there is none to show.
+   */
+  const readForBrowserRequest = async (request: Request): Promise<unknown> => {
+    let body: unknown
+    try {
+      body = await request.json()
+    } catch {
+      return null
+    }
+    const sessionId = sessionIdOf(body)
+    if (sessionId === undefined) return null
+    const opened = await domain()
+    return readSuggestion(opened, sessionId) ?? null
+  }
 
   const handleTurnEnd = (session: Session, turn: number): void => {
     let state = states.get(session)
@@ -342,30 +363,28 @@ function applyWithProjections(ctx: Context, config: Config): void {
     for (const state of tracked) state.pending?.controller.abort()
   })
 
-  // The browser read endpoint. `ctx.connection.rpc.handle` registers one
-  // generic channel owned by this plugin's fiber and returns its disposer;
-  // `ctx.effect` ties that lifetime to the plugin. A malformed payload is
-  // answered with `null` rather than throwing: the caller is the composer,
-  // which only ever wants a value to render.
-  ctx.effect(() => {
-    const remove = ctx.connection.rpc.handle(SUGGEST_RPC_CHANNEL, async (endpoint, payload) => {
-      if (endpoint !== SUGGEST_RPC_GET) {
-        return {
-          ok: false as const,
-          error: {
-            code: 'unknown-endpoint',
-            message: `unknown endpoint ${endpoint}`,
-            details: {},
-          },
-        }
-      }
-      const sessionId = sessionIdOf(payload)
-      if (sessionId === undefined) return { ok: true as const, value: null }
-      const opened = await domain()
-      return { ok: true as const, value: readSuggestion(opened, sessionId) ?? null }
-    })
-    return () => { void remove() }
-  }, 'suggest-prompt: browser suggestion endpoint')
+  // The browser read endpoint. `connection.fetch.register` claims an exact
+  // path on the shared `/api` gateway and returns its disposer, which
+  // `ctx.effect` ties to the plugin. A malformed body is answered `null`
+  // rather than thrown: the caller is the composer, which only ever wants a
+  // value to render.
+  //
+  // Deliberately NOT `connection.rpc.handle`: that surface registers an HTTP
+  // route through the *connection* service's own fiber, which never injects
+  // `webServer`, so it throws there regardless of this plugin's own `inject`
+  // list. See `SUGGEST_ROUTE_PATH`.
+  ctx.effect(
+    () => ctx.connection.fetch.register({
+      path: SUGGEST_ROUTE_PATH,
+      methods: [SUGGEST_ROUTE_METHOD],
+      requestBody: 'buffered',
+      fetch: async (request: Request): Promise<Response> => {
+        const suggestion = await readForBrowserRequest(request)
+        return Response.json({ suggestion })
+      },
+    }),
+    'suggest-prompt: browser suggestion route',
+  )
 
   // Host-only transcript fold: the retained transcript that generation reads in
   // place of the prohibited synchronous session-history scans. It carries no

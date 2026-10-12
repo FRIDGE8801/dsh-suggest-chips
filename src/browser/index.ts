@@ -32,11 +32,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: the ctx.locale Context merge.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: the ctx.connection Context merge (the RPC face this plugin calls).
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { GhostSuggestion } from './GhostSuggestion.tsx'
 import type { GhostSuggestionProps } from './GhostSuggestion.tsx'
-import type { SuggestPromptRpcFace } from './suggestion-source.ts'
 import { SettingsCard } from './SettingsCard.tsx'
 import { SuggestPromptCardController, SUGGEST_PROMPT_NS } from './settings-controller.ts'
 import type {
@@ -118,17 +116,14 @@ export const inject = ['slots']
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  // The RPC face is resolved once and closed over by the cell: the overlay reads
-  // the stored suggestion from the host over `ctx.connection.rpc`, not from a
-  // session projection. `dsh-client-connection` is a type-only dependency (it
-  // is absent from the client bundle's seeded module whitelist), so the face is
-  // captured structurally and the component never names the package.
-  const face: SuggestPromptRpcFace = ctx as unknown as SuggestPromptRpcFace
+  // The overlay reads the stored suggestion from the host over the plugin's own
+  // `/api` route, so it needs no face resolved here: a plain `fetch` reaches it,
+  // and the component takes only the standard slot props.
   ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
     name: 'conversation.input.overlay',
     id: 'suggest-prompt',
     order: 30,
-  }, (props: GhostSuggestionProps) => GhostSuggestion({ ...props, face })))
+  }, (props: GhostSuggestionProps) => GhostSuggestion(props)))
 
   ctx.inject(['configForms', 'locale'], (settingsCtx) => {
     settingsCtx.effect(

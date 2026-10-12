@@ -29,6 +29,7 @@ import {
   systemPrompt,
 } from '../src/generate.ts'
 import { SUGGEST_DOMAIN_NAME } from '../src/records.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../src/rpc-contract.ts'
 import type { SuggestPromptStorageRecord } from '../src/domain.ts'
 import type { SuggestPromptSuggestion, SuggestPromptTranscriptState } from '../src/types.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from '../src/transcript.ts'
@@ -104,22 +105,31 @@ interface RpcCall {
   readonly payload: unknown
 }
 
-/** Minimal `ctx.connection.rpc` stand-in: records handles, answers by endpoint. */
-class RpcHostStandin {
-  readonly calls: RpcCall[] = []
-  readonly handlers = new Map<string, (endpoint: string, payload: unknown) => Promise<unknown>>()
+/** Minimal `ctx.connection.fetch` stand-in: records routes, drives their fetch. */
+class FetchRouteStandin {
+  readonly routes = new Map<string, { methods: readonly string[]; fetch: (request: Request) => Promise<Response> }>()
 
-  handle(channel: string, handler: (endpoint: string, payload: unknown) => Promise<unknown>): () => Promise<void> {
-    this.handlers.set(channel, handler)
-    return async () => { this.handlers.delete(channel) }
+  register(route: {
+    path: string
+    methods: readonly string[]
+    requestBody: unknown
+    fetch: (request: Request) => Promise<Response>
+  }): () => void {
+    this.routes.set(route.path, { methods: route.methods, fetch: route.fetch })
+    return () => { this.routes.delete(route.path) }
   }
 
-  /** Drive the registered channel exactly as the carrier would. */
-  async call(endpoint: string, payload: unknown): Promise<unknown> {
-    const handler = this.handlers.get('/suggest-prompt')
-    if (handler === undefined) throw new Error('no host handler registered for /suggest-prompt')
-    this.calls.push({ channel: '/suggest-prompt', endpoint, payload })
-    return await handler(endpoint, payload)
+  /** Drive the registered route exactly as the `/api` gateway would. */
+  async request(sessionId: unknown, path = SUGGEST_ROUTE_PATH): Promise<unknown> {
+    const route = this.routes.get(path)
+    if (route === undefined) throw new Error(`no host route registered for ${path}`)
+    const response = await route.fetch(new Request(`http://localhost${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    }))
+    const body = await response.json() as { suggestion: unknown }
+    return body.suggestion
   }
 }
 
@@ -127,7 +137,7 @@ class RpcHostStandin {
 interface Bench {
   readonly ctx: Context
   readonly domain: FakeStorageDomain
-  readonly rpc: RpcHostStandin
+  readonly routes: FetchRouteStandin
 }
 
 /**
@@ -141,14 +151,20 @@ async function bench(config: Config = CONFIG): Promise<Bench> {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
-  const rpc = new RpcHostStandin()
-  ctx.provide('webServer', { register: () => () => undefined } as never)
-  ctx.provide('connection', { rpc } as never)
+  const routes = new FetchRouteStandin()
+  ctx.provide('connection', { fetch: routes } as never)
   const domain = createFakeDomain()
   installFakeStorage(ctx, domain)
   contexts.push(ctx)
   await ctx.plugin(suggestPromptPlugin, config)
-  return { ctx, domain, rpc }
+  await new Promise(r => setTimeout(r, 30))
+  // Surface a mount failure instead of letting it read as "no suggestion".
+  for (const entry of (ctx as unknown as { loader?: { entries(): Iterable<{ options?: { id?: string }; fiber?: { error?: unknown } }> } }).loader?.entries?.() ?? []) {
+    if (String(entry.options?.id).includes('suggest') && entry.fiber?.error !== undefined) {
+      throw new Error(`suggest-prompt did not activate: ${String(entry.fiber.error)}`)
+    }
+  }
+  return { ctx, domain, routes }
 }
 
 function userMessage(text: string) {
@@ -397,8 +413,10 @@ describe('suggestPromptDomainSpec', () => {
     // with a per-record layout, so a write rewrites exactly one session's
     // document and an unreadable record is skipped instead of failing the boot.
     expect(SUGGEST_DOMAIN_NAME).toBe('suggest_prompt')
-    expect(suggestPromptPlugin.SUGGEST_RPC_CHANNEL).toBe('/suggest-prompt')
-    expect(suggestPromptPlugin.SUGGEST_RPC_GET).toBe('get')
+    // The channel must sit under `/api`: Connection's `assertFetchRoute`
+    // rejects anything else, and only registered exact paths are dispatched.
+    expect(suggestPromptPlugin.SUGGEST_ROUTE_PATH).toBe('/api/suggest-prompt')
+    expect(suggestPromptPlugin.SUGGEST_ROUTE_METHOD).toBe('POST')
   })
 
   it('round-trips a suggestion through the wire projection', async () => {
@@ -449,37 +467,28 @@ describe('suggest-prompt plugin generation', () => {
     })
   })
 
-  it('serves the stored suggestion to the browser over the plugin RPC channel', async () => {
-    const { ctx, rpc } = await bench()
+  it('serves the stored suggestion to the browser over the plugin route', async () => {
+    const { ctx, routes } = await bench()
     ctx.llm.registerAdapter(['main'], new ImmediateAdapter())
-    const session = ctx.sessions.create(SessionId('rpc-read'))
+    const session = ctx.sessions.create(SessionId('route-read'))
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
 
-    // Before the first suggestion the endpoint answers null, never an error:
-    // the caller is the composer, which only wants a value to render.
-    expect(await rpc.call('get', { sessionId: 'nothing-stored' }))
-      .toEqual({ ok: true, value: null })
-    expect(await rpc.call('get', { sessionId: 'rpc-read' })).toEqual({
-      ok: true,
-      value: {
-        turn: 1,
-        baseSeq: expect.any(Number),
-        text: '继续修复登录页',
-        truncated: false,
-        route: { provider: 'main', model: 'main-model' },
-        acceptKey: 'Tab',
-      },
+    // Before the first suggestion the route answers null, never an error: the
+    // caller is the composer, which only wants a value to render.
+    expect(await routes.request('nothing-stored')).toBeNull()
+    expect(await routes.request('route-read')).toEqual({
+      turn: 1,
+      baseSeq: expect.any(Number),
+      text: '继续修复登录页',
+      truncated: false,
+      route: { provider: 'main', model: 'main-model' },
+      acceptKey: 'Tab',
     })
-    // A malformed payload is answered with null rather than throwing.
-    expect(await rpc.call('get', 'not-an-object')).toEqual({ ok: true, value: null })
-    expect(await rpc.call('get', { sessionId: '' })).toEqual({ ok: true, value: null })
-    // An unknown endpoint is a real failure, not a silent null.
-    expect(await rpc.call('put', { sessionId: 'rpc-read' })).toMatchObject({
-      ok: false,
-      error: { code: 'unknown-endpoint' },
-    })
+    // A malformed body is answered with null rather than throwing.
+    expect(await routes.request('not-an-object')).toBeNull()
+    expect(await routes.request('')).toBeNull()
   })
 
   it('composes a partial route override with the session route', async () => {
@@ -1027,42 +1036,39 @@ describe('suggest-prompt log prohibition invariant', () => {
 
 describe('plugin mount composition', () => {
   it('declares the services the durable store and browser endpoint need', () => {
-    // `webServer` is not optional decoration: `connection.rpc.handle` registers
-    // the channel through `owner.webServer.register(...)`, and Cordis gates that
-    // read on `inject`. Without it the plugin body throws
-    // `cannot get property "webServer" without inject`, which rolls back the
-    // session listener registered moments earlier — the plugin then goes silent
-    // with no other symptom. That was the desktop bug this pins.
+    // No `webServer`: this plugin registers through `connection.fetch`, which
+    // touches only the connection service's own route table. The sibling
+    // `rpc.handle` surface is the one that reads `webServer` — and it reads it
+    // on the CONNECTION fiber, which never injects it, so that call throws
+    // there no matter what this list says. See `SUGGEST_ROUTE_PATH`.
     expect(suggestPromptPlugin.inject)
-      .toEqual(['llm', 'sessions', 'storageDomain', 'connection', 'webServer'])
+      .toEqual(['llm', 'sessions', 'storageDomain', 'connection'])
     expect(suggestPromptPlugin.name).toBe('suggest-prompt')
   })
 
-  it('injects webServer alongside connection, which the RPC channel reads', async () => {
-    // The desktop regression. `connection.rpc.handle` registers the channel as
-    // an HTTP route through `owner.webServer.register(...)`; in the real profile
-    // that read is inject-gated and throws
-    // `cannot get property "webServer" without inject`. The throw aborts the
-    // plugin body, so the `session/event` listener registered moments earlier is
-    // rolled back and the composer never shows ghost text — with no error the
-    // user can see anywhere.
+  it('registers its browser route through connection.fetch, not webServer', async () => {
+    // The desktop regression. `connection.rpc.handle` registers its channel as
+    // an HTTP route through `owner.webServer.register(...)`, where `owner` is
+    // the CONNECTION service's own fiber — which injects `['credentials']` plus
+    // its profile row's `[webRuntime]`, never `webServer`. That read therefore
+    // throws `cannot get property "webServer" without inject` inside the
+    // harness, regardless of this plugin's own `inject`, aborting the plugin
+    // body and rolling back the session listener with it. The composer then
+    // never fills and nothing is reported anywhere the user can see.
     //
-    // This asserts the declaration, not the failure: whether a bare `webServer`
-    // read throws depends on the live profile's isolate graph, and a unit bench
-    // that provides the service at the root cannot reproduce the gate. The
-    // declaration is the contract; the throw is its consequence.
+    // `connection.fetch.register` writes only to the connection's own route
+    // table, so it carries no such dependency.
     expect(suggestPromptPlugin.inject).toContain('connection')
-    expect(suggestPromptPlugin.inject).toContain('webServer')
+    expect(suggestPromptPlugin.inject).not.toContain('webServer')
 
-    // With both declared the plugin mounts, keeps its listener, and answers.
-    const { ctx, rpc } = await bench()
+    const { ctx, routes } = await bench()
     const seen: string[] = []
     ctx.on('session/event', (_s, event) => { seen.push(event.type) })
-    const session = ctx.sessions.create(SessionId('webserver-liveness'))
+    const session = ctx.sessions.create(SessionId('route-liveness'))
     appendTurn(session, 1, '问题', '回答')
     await settle()
     expect(seen).toContain('turn/end')
-    expect([...rpc.handlers.keys()]).toContain(suggestPromptPlugin.SUGGEST_RPC_CHANNEL)
+    expect([...routes.routes.keys()]).toContain(suggestPromptPlugin.SUGGEST_ROUTE_PATH)
   })
 
   it('registers only the host-only transcript projection, never a client-visible one', async () => {
@@ -1081,10 +1087,10 @@ describe('plugin mount composition', () => {
   })
 
   it('unregisters the browser endpoint when the plugin unloads', async () => {
-    const { ctx, rpc } = await bench()
-    expect(rpc.handlers.has('/suggest-prompt')).toBe(true)
+    const { routes } = await bench()
+    expect(routes.routes.has(SUGGEST_ROUTE_PATH)).toBe(true)
     for (const each of [...contexts]) await each.fiber.dispose()
-    expect(rpc.handlers.has('/suggest-prompt')).toBe(false)
+    expect(routes.routes.has(SUGGEST_ROUTE_PATH)).toBe(false)
   })
 
   it('mounts the generation capability without a configured route but never calls the LLM', async () => {

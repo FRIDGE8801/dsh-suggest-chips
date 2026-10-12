@@ -1,19 +1,21 @@
 /**
- * Browser-side suggestion source: reads the host's stored suggestion over the
- * plugin's own `connection.rpc` channel.
+ * Browser-side suggestion source: reads the host's stored suggestion from the
+ * plugin's own route on the shared `/api` gateway.
  *
  * The suggestion does NOT travel through a session projection. A projection can
  * only be advanced by a committed session event, and writing a plugin-private
  * event type is exactly what made sessions unreadable on cold read (issue #4) —
  * `0.2.0-rc.2` has no way to mark an appended event `ignorable`. So the host
- * keeps the suggestion in its own storage domain and serves it through
- * `ctx.connection.rpc.handle('/suggest-prompt', …)`, which is a public,
- * plugin-owned channel; nothing is written to the session log at all.
+ * keeps the suggestion in its own storage domain and serves it over an exact
+ * fetch route; nothing is written to the session log at all.
  *
- * `dsh-client-connection` is a type-only dependency here on purpose: the client
- * bundle's module whitelist (`PLATFORM_MODULES`) does not seed it, so it must
- * never appear in the emitted `require` set. This module only needs the
- * `ctx.connection` Context merge, which the type-only import supplies.
+ * A plain `fetch` is deliberate. `connection.rpc.call` would work here, but the
+ * host cannot register that channel: `rpc.handle` reads `owner.webServer` on the
+ * *connection* service's own fiber, which never injects `webServer`, so it
+ * throws there no matter what the plugin declares. The fetch route has no such
+ * dependency — and it keeps this module free of any `dsh-client-*` import, which
+ * matters because the client bundle's module whitelist (`PLATFORM_MODULES`) does
+ * not seed them.
  *
  * Refresh is a bounded poll (see {@link POLL_INTERVAL_MS}). A turn completes on
  * the host asynchronously after the client's own `running` flag drops, so a
@@ -25,30 +27,7 @@
 
 import { useEffect, useState } from 'react'
 import type { SuggestPromptSuggestion } from '../types.ts'
-import { SUGGEST_RPC_CHANNEL, SUGGEST_RPC_GET } from '../rpc-contract.ts'
-
-/**
- * The RPC face this plugin's browser half needs.
- *
- * Declared structurally rather than imported from `dsh-client-connection`: that
- * package is a type-only dependency (it is absent from the client bundle's
- * module whitelist), so this module keeps its own minimal view of the one
- * method it calls. The `ctx.connection` Context merge still comes from the
- * type-only import in the plugin entry.
- */
-export interface SuggestPromptRpcFace {
-  /** Generic RPC caller over a plugin-owned channel. */
-  readonly connection: {
-    readonly rpc: {
-      call(
-        channel: string,
-        endpoint: string,
-        payload: unknown,
-        signal?: AbortSignal,
-      ): Promise<{ readonly ok: boolean; readonly value?: unknown }>
-    }
-  }
-}
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../rpc-contract.ts'
 
 /**
  * Poll interval for the stored suggestion, in milliseconds.
@@ -65,28 +44,27 @@ export const POLL_INTERVAL_MS = 700
  * Every failure mode returns `null` rather than throwing: this feeds ghost text
  * inside the composer, and a broken read must degrade to "no suggestion"
  * instead of surfacing an error where the user is typing.
- * @param ctx - client context carrying the connection service.
  * @param sessionId - session whose suggestion is read.
  * @param signal - abort signal for the request.
  * @returns the suggestion, or `null` when none is stored or the read failed.
  */
 export async function fetchSuggestion(
-  ctx: SuggestPromptRpcFace,
   sessionId: string,
   signal: AbortSignal,
 ): Promise<SuggestPromptSuggestion | null> {
   try {
-    const result = await ctx.connection.rpc.call(
-      SUGGEST_RPC_CHANNEL,
-      SUGGEST_RPC_GET,
-      { sessionId },
+    const response = await fetch(SUGGEST_ROUTE_PATH, {
+      method: SUGGEST_ROUTE_METHOD,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
       signal,
-    )
-    if (!result.ok) {
-      warnOnce(`suggest-prompt: read failed (${JSON.stringify((result as { error?: unknown }).error)})`)
+    })
+    if (!response.ok) {
+      warnOnce(`suggest-prompt: read failed with HTTP ${String(response.status)}`)
       return null
     }
-    const value = result.value
+    const body = await response.json() as { suggestion?: unknown }
+    const value = body.suggestion
     return value === null || value === undefined ? null : value as SuggestPromptSuggestion
   } catch (error) {
     // An aborted request is the normal unmount path; a genuine transport
@@ -120,12 +98,10 @@ function warnOnce(message: string): void {
  * The first read is immediate so a suggestion stored before this page loaded
  * (a reload, or a session reopened from history) reappears without waiting a
  * full interval.
- * @param ctx - client context carrying the connection service.
  * @param sessionId - session whose suggestion is tracked.
  * @returns the latest suggestion, or `null` while none is stored.
  */
 export function useStoredSuggestion(
-  ctx: SuggestPromptRpcFace,
   sessionId: string,
 ): SuggestPromptSuggestion | null {
   const [suggestion, setSuggestion] = useState<SuggestPromptSuggestion | null>(null)
@@ -134,7 +110,7 @@ export function useStoredSuggestion(
     let cancelled = false
     const controller = new AbortController()
     const read = (): void => {
-      void fetchSuggestion(ctx, sessionId, controller.signal).then((value) => {
+      void fetchSuggestion(sessionId, controller.signal).then((value) => {
         if (cancelled) return
         // Preserve the previous reference when the payload is unchanged so the
         // memoized accept-key matcher and the effect below do not churn on
@@ -149,7 +125,7 @@ export function useStoredSuggestion(
       controller.abort()
       clearInterval(timer)
     }
-  }, [ctx, sessionId])
+  }, [sessionId])
 
   return suggestion
 }
