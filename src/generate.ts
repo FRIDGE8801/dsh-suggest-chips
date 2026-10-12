@@ -1,9 +1,9 @@
 /**
  * Bounded auxiliary suggestion generation: transcript framing, secret
  * redaction, route resolution, deadline-fused LLM dispatch, and output
- * sanitization. Mirrors the session-title-llm call policy (byte bound, output
- * cap, deadline, pre-dispatch request event) so the model-visible⟺logged
- * invariant holds for every suggestion request.
+ * sanitization. The suggestion is persisted as ONE ignorable plugin record
+ * (see ./records.ts) — nothing else is ever written to the session log
+ * (issue #4).
  * @module @studyzy/dsh-suggest-prompt/generate
  */
 
@@ -17,7 +17,8 @@ import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-ll
 import type { Session } from '@deepseek-ai/dsh-session'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { deadline, MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import type { SuggestPromptRequested, SuggestPromptSuggested } from './domain.ts'
+import type { SuggestPromptSuggested } from './domain.ts'
+import { appendSuggestedRecord } from './records.ts'
 import { cleanSuggestion, hasCJK, sanitizeSuggestion, shouldFilterSuggestion } from './sanitize.ts'
 import type { SuggestPromptTranscriptState } from './types.ts'
 import type { Config } from './index.ts'
@@ -327,7 +328,7 @@ function finishError(finish: FinishReason): Error | undefined {
  * @param session - owning session log.
  * @param turn - completed turn whose completion this suggestion answers.
  * @param signal - cancellation forwarded to the auxiliary call.
- * @returns the durable whole-value suggestion event payload, or `undefined`
+ * @returns the durable whole-value suggestion record payload, or `undefined`
  * when the model produced no usable suggestion (an empty or semantically
  * rejectable reply — the system prompt tells it to reply with nothing when the
  * next step is not obvious). Genuine failures throw.
@@ -369,22 +370,10 @@ export async function generateSuggestion(
     ...(reasoningOff ? { reasoningEffort: SUGGEST_REASONING_EFFORT } : {}),
     signal: callDeadline.signal,
   })
-  const requestEvent: SuggestPromptRequested = {
-    version: 1,
-    turn,
-    sourceMessageSeqs: [...transcript.sourceMessageSeqs],
-    route,
-    system,
-    messages,
-    maxTokens: config.maxOutputTokens,
-  }
   // The request is tried reasoning-off first (fast and cheap); a model whose
   // adapter rejects `off` (UNSUPPORTED_REASONING_EFFORT) retries without the
-  // override so a suggestion still generates. Each attempt that could reach
-  // the wire appends its own pre-dispatch request event, so the log
-  // reconstructs exactly what the model saw and the suggestion points at the
-  // request that produced it.
-  const firstRequest = session.append('suggest-prompt/request', { ...requestEvent, reasoningOff: true })
+  // override so a suggestion still generates. Nothing is logged per attempt —
+  // the only durable trace of the exchange is the suggestion record below.
   callDeadline.signal.throwIfAborted()
   const drain = async (options: GenerateOptions): Promise<ReturnType<BlockAssembler['blocks']>> => {
     const assembler = new BlockAssembler()
@@ -397,14 +386,11 @@ export async function generateSuggestion(
     if (terminalError !== undefined) throw terminalError
     return assembler.blocks()
   }
-  let request = firstRequest
   let blocks: ReturnType<BlockAssembler['blocks']>
   try {
     blocks = await drain(requestOptions(true))
   } catch (error: unknown) {
     if ((error as { code?: unknown } | null)?.code !== 'UNSUPPORTED_REASONING_EFFORT') throw error
-    // The retry is a distinct wire-visible request; log it before dispatching.
-    request = session.append('suggest-prompt/request', { ...requestEvent, reasoningOff: false })
     blocks = await drain(requestOptions(false))
   }
   if (blocks.some(block => block.type === 'tool-call')) {
@@ -420,7 +406,7 @@ export async function generateSuggestion(
   if (cleaned.length === 0 || shouldFilterSuggestion(cleaned)) {
     // An empty or semantically rejectable reply is a normal "no suggestion"
     // (the prompt tells the model to stay silent when the next step is not
-    // obvious), not a failure. The request event above still records the call.
+    // obvious), not a failure. Nothing reaches the log.
     return undefined
   }
   const { text: suggestion, truncated } = sanitizeSuggestion(cleaned, config.maxSuggestionChars)
@@ -431,9 +417,8 @@ export async function generateSuggestion(
     text: suggestion,
     truncated,
     route,
-    requestSeq: request.seq,
     acceptKey: config.acceptKey ?? 'Tab',
   }
-  session.append('suggest-prompt/suggested', suggested)
+  appendSuggestedRecord(session, suggested)
   return suggested
 }

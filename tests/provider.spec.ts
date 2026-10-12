@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import LlmRuntime, { createAssistantMessage, createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -17,9 +17,11 @@ import {
   suggestionLanguage,
   systemPrompt,
 } from '../src/generate.ts'
+import { SUGGEST_RECORD_TYPE } from '../src/records.ts'
 import type { SuggestPromptProjection, SuggestPromptTranscriptState } from '../src/types.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from '../src/transcript.ts'
-import type { SuggestPromptRequested, SuggestPromptSuggested } from '../src/domain.ts'
+import type { SuggestPromptSuggested } from '../src/domain.ts'
+import { installTestRecordWriter, restoreRecordWriter, suggestedRecords } from './records.ts'
 
 const CONFIG = {
   maxInputBytes: 1000,
@@ -78,7 +80,14 @@ class ThrowingStringAdapter extends LlmAdapter {
 
 let contexts: Context[] = []
 
+beforeEach(() => {
+  // The pinned rc.2 devDependency has no record writer; the stand-in lets the
+  // generation flows under test persist suggestions like a dsh >= 0.2.1 host.
+  installTestRecordWriter()
+})
+
 afterEach(async () => {
+  restoreRecordWriter()
   for (const ctx of contexts) await ctx.fiber.dispose()
   contexts = []
 })
@@ -114,9 +123,7 @@ function appendTurn(session: Session, turn: number, user: string, assistant: str
 }
 
 function suggestedEvents(session: Session): SuggestPromptSuggested[] {
-  return session.snapshotEvents()
-    .filter(event => event.type === 'suggest-prompt/suggested')
-    .map(event => event.data)
+  return suggestedRecords(session)
 }
 
 /**
@@ -328,33 +335,40 @@ describe('buildTranscript', () => {
 
 describe('applySuggestPromptProjection', () => {
   it('returns the same reference for unrelated events', () => {
-    const state: SuggestPromptProjection = { turn: 1, baseSeq: 2, text: 'x', truncated: false, requestSeq: 3, acceptKey: 'Tab' }
+    const state: SuggestPromptProjection = { turn: 1, baseSeq: 2, text: 'x', truncated: false, acceptKey: 'Tab' }
     const event = { type: 'turn/start', data: { turn: 1 } } as never
     expect(applySuggestPromptProjection(state, event)).toBe(state)
   })
 
   it('maps a suggested whole value, keeping route when present', () => {
     const event = {
-      type: 'suggest-prompt/suggested',
+      type: SUGGEST_RECORD_TYPE,
       data: {
         version: 1, turn: 2, baseSeq: 5, text: '继续', truncated: true,
-        route: { provider: 'main', model: 'main-model' }, requestSeq: 6, acceptKey: 'Tab',
+        route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
       },
     } as never
     expect(applySuggestPromptProjection(null, event)).toEqual({
       turn: 2, baseSeq: 5, text: '继续', truncated: true,
-      route: { provider: 'main', model: 'main-model' }, requestSeq: 6, acceptKey: 'Tab',
+      route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
     })
   })
 
   it('maps a suggested whole value without a route', () => {
     const event = {
-      type: 'suggest-prompt/suggested',
-      data: { version: 1, turn: 2, baseSeq: 5, text: '继续', truncated: false, requestSeq: 6, acceptKey: 'Tab' },
+      type: SUGGEST_RECORD_TYPE,
+      data: { version: 1, turn: 2, baseSeq: 5, text: '继续', truncated: false, acceptKey: 'Tab' },
     } as never
     expect(applySuggestPromptProjection(null, event)).toEqual({
-      turn: 2, baseSeq: 5, text: '继续', truncated: false, requestSeq: 6, acceptKey: 'Tab',
+      turn: 2, baseSeq: 5, text: '继续', truncated: false, acceptKey: 'Tab',
     })
+  })
+
+  it('ignores a malformed record instead of folding garbage into the state', () => {
+    const state: SuggestPromptProjection = { turn: 1, baseSeq: 2, text: 'x', truncated: false, acceptKey: 'Tab' }
+    // A restored record carries whatever JSON an earlier build wrote.
+    const event = { type: SUGGEST_RECORD_TYPE, data: { version: 1, turn: 'bad' } } as never
+    expect(applySuggestPromptProjection(state, event)).toBe(state)
   })
 })
 
@@ -372,15 +386,13 @@ describe('suggest-prompt plugin generation', () => {
     expect(adapter.requests[0]).toMatchObject({ provider: 'main', model: 'main-model', purpose: 'suggest-prompt', maxTokens: 32 })
     expect(adapter.requests[0]?.system).toBe(systemPrompt(40, '简体中文'))
 
-    // The bare LlmAdapter declares no reasoning support, so the reasoning-off
-    // attempt is refused before dispatch and the generation retries without the
-    // override. Both attempts are logged pre-dispatch; the suggestion points at
-    // the request that actually produced it (the retry).
-    const requestEvents = session.snapshotEvents().filter(event => event.type === 'suggest-prompt/request')
-    expect(requestEvents).toHaveLength(2)
-    expect((requestEvents[0]?.data as SuggestPromptRequested | undefined)?.reasoningOff).toBe(true)
-    expect((requestEvents[1]?.data as SuggestPromptRequested | undefined)?.reasoningOff).toBe(false)
-    expect((requestEvents[0]?.data as { sourceMessageSeqs: number[] }).sourceMessageSeqs.length).toBe(2)
+    // Nothing but the ignorable suggestion record ever enters the log: the
+    // former pre-dispatch `suggest-prompt/request` events are gone (issue #4
+    // — private event types wedged sessions on cold read). On a real
+    // dsh >= 0.2.1 host the record also carries `ignorable: true`, set by the
+    // harness writer itself (not reproducible through the test stand-in).
+    const loggedTypes = session.snapshotEvents().map(event => event.type as string)
+    expect(loggedTypes.filter(type => type.startsWith('suggest-prompt'))).toEqual([])
 
     const suggested = suggestedEvents(session)
     expect(suggested).toHaveLength(1)
@@ -388,7 +400,6 @@ describe('suggest-prompt plugin generation', () => {
       turn: 1, text: '继续修复登录页', truncated: false,
       route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
     })
-    expect(suggested[0]?.requestSeq).toBe(requestEvents[1]?.seq)
 
     const projection = ctx.sessionProjections.snapshot(session).values.suggestPrompt
     expect(projection).toMatchObject({ turn: 1, text: '继续修复登录页', acceptKey: 'Tab' })
@@ -448,8 +459,7 @@ describe('suggest-prompt plugin generation', () => {
 
     await settle()
     expect(adapter.requests).toHaveLength(1)
-    const requestData = session.snapshotEvents().find(event => event.type === 'suggest-prompt/request')!.data as { messages: readonly Message[] }
-    const framed = requestData.messages[0]?.content
+    const framed = adapter.requests[0]!.messages[0]!.content
       .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
       .map(block => block.text)
       .join(' ')
@@ -503,8 +513,8 @@ describe('suggest-prompt plugin generation', () => {
     session.append('user/message', userMessage('问题'), { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 1, message: assistantMessage('回答') }, { surfaceOp: 'append' })
     session.append('request/header', { header: { config: { provider: 'main', model: 'main-model' } }, reason: 'initial' })
-    session.append('suggest-prompt/suggested', {
-      version: 1, turn: 1, baseSeq: 4, text: '已有建议', truncated: false, requestSeq: 5, acceptKey: 'Tab',
+    session.append(SUGGEST_RECORD_TYPE, {
+      version: 1, turn: 1, baseSeq: 4, text: '已有建议', truncated: false, acceptKey: 'Tab',
     })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
@@ -768,7 +778,7 @@ describe('generateSuggestion direct boundary', () => {
       new AbortController().signal,
     )
     expect(result).toBeUndefined()
-    expect(session.snapshotEvents().some(event => event.type === 'suggest-prompt/suggested')).toBe(false)
+    expect(suggestedRecords(session)).toHaveLength(0)
   })
 
   it('defaults the accept key to Tab when the config omits it', async () => {
@@ -811,8 +821,7 @@ describe('generateSuggestion direct boundary', () => {
       new AbortController().signal,
     )
     expect(result).toBeDefined()
-    const requestData = session.snapshotEvents().find(event => event.type === 'suggest-prompt/request')!.data as { messages: readonly Message[] }
-    const framed = requestData.messages[0]?.content
+    const framed = adapter.requests[0]!.messages[0]!.content
       .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
       .map(block => block.text)
       .join(' ')
@@ -832,36 +841,60 @@ describe('suggest-prompt durable invariant', () => {
     return ctx
   }
 
-  it('rejects an unsupported event version', async () => {
+  it('accepts a well-formed suggestion record committed after install', async () => {
+    const ctx = await invariantCtx()
+    const session = ctx.sessions.create(SessionId('inv-valid'))
+    session.append('turn/start', { turn: 1 })
+    expect(() => session.append(SUGGEST_RECORD_TYPE, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    })).not.toThrow()
+  })
+
+  it('rejects an unsupported record version', async () => {
     const ctx = await invariantCtx()
     const session = ctx.sessions.create(SessionId('inv-version'))
-    expect(() => session.append('suggest-prompt/request', { version: 2 } as never))
-      .toThrow(/unsupported version/)
+    expect(() => session.append(SUGGEST_RECORD_TYPE, { version: 2, turn: 1 } as never))
+      .toThrow(/invalid suggestion payload/)
   })
 
-  it('rejects a request with an invalid payload', async () => {
-    const ctx = await invariantCtx()
-    const session = ctx.sessions.create(SessionId('inv-request'))
-    expect(() => session.append('suggest-prompt/request', {
-      version: 1, turn: 'bad', sourceMessageSeqs: [], route: null,
-      system: '', messages: [], maxTokens: 'x',
-    } as never)).toThrow(/invalid request payload/)
-  })
-
-  it('rejects a request whose route is not an object', async () => {
-    const ctx = await invariantCtx()
-    const session = ctx.sessions.create(SessionId('inv-route'))
-    expect(() => session.append('suggest-prompt/request', {
-      version: 1, turn: 1, sourceMessageSeqs: [], route: 'bad',
-      system: 'x', messages: [{ id: 'm' as never }], maxTokens: 1,
-    } as never)).toThrow(/invalid request payload/)
-  })
-
-  it('rejects a suggested event with an invalid payload', async () => {
+  it('rejects a suggestion record with an invalid payload', async () => {
     const ctx = await invariantCtx()
     const session = ctx.sessions.create(SessionId('inv-suggested'))
-    expect(() => session.append('suggest-prompt/suggested', {
-      version: 1, turn: 1, baseSeq: 'x', text: '', truncated: 'y', requestSeq: 1,
+    expect(() => session.append(SUGGEST_RECORD_TYPE, {
+      version: 1, turn: 1, baseSeq: 'x', text: '', truncated: 'y', acceptKey: 'Tab',
     } as never)).toThrow(/invalid suggestion payload/)
+  })
+
+  it('ignores foreign plugin records', async () => {
+    const ctx = await invariantCtx()
+    const session = ctx.sessions.create(SessionId('inv-foreign'))
+    expect(() => session.append('plugin:other/state', { anything: true } as never)).not.toThrow()
+  })
+})
+
+describe('without a harness record writer (dsh < 0.2.1)', () => {
+  it('stays dormant: warns once, never calls the LLM, never writes the log', async () => {
+    // Simulate 0.2.0-rc.2, where appendPluginRecord does not exist. The
+    // alternative — an LLM call whose only delivery channel wedges the
+    // session — is exactly the issue #4 failure this gate prevents.
+    restoreRecordWriter()
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    contexts.push(ctx)
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    await ctx.plugin(suggestPromptPlugin, CONFIG)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cannot persist ignorable plugin records'))
+
+    const adapter = new ImmediateAdapter()
+    ctx.llm.registerAdapter(['main'], adapter)
+    const session = ctx.sessions.create(SessionId('dormant'))
+    appendTurn(session, 1, '问题', '回答')
+    await settle()
+    expect(adapter.requests).toHaveLength(0)
+    expect(suggestedRecords(session)).toHaveLength(0)
+    // The projection key is absent (capability absence), not a stale null.
+    expect(ctx.sessionProjections.snapshot(session).values.suggestPrompt).toBeUndefined()
   })
 })

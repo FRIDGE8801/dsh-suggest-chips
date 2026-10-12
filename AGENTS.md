@@ -10,7 +10,7 @@ This repo is the **authoritative source of record** for one bundle package `@stu
 
 | Half | Outlet | Role |
 |---|---|---|
-| host / node | `.`, `./invariant`, `./types` | On `turn/end` (reason `completed`), builds a bounded transcript, calls `ctx.llm`, sanitizes the reply, appends a `suggest-prompt/suggested` session event, and publishes the `suggestPrompt` session projection. |
+| host / node | `.`, `./invariant`, `./types` | On `turn/end` (reason `completed`), builds a bounded transcript, calls `ctx.llm`, sanitizes the reply, persists the suggestion as one ignorable plugin record, and publishes the `suggestPrompt` session projection. |
 | browser | `./client` | Reads the `suggestPrompt` projection and renders it as ghost placeholder text in the composer (`conversation.input.overlay` slot), plus a WebUI settings card. |
 
 ## Commands
@@ -18,10 +18,12 @@ This repo is the **authoritative source of record** for one bundle package `@stu
 Requires Node `^22.19` or `>=24` and `pnpm`. Run everything from the repo root (single package, no workspace fan-out).
 
 ```sh
-pnpm install       # uses pnpm.overrides mapping 3 unpublished @deepseek-ai packages to local empty stubs/
-pnpm build         # tsc -p tsconfig.json && tsdown: host ESM (lib/{index,invariant}.js) + browser bundle (lib/client.js)
-pnpm typecheck     # tsc --noEmit
-pnpm test          # vitest run
+pnpm install        # uses pnpm.overrides mapping 3 unpublished @deepseek-ai packages to local empty stubs/ (and pinning @deepseek-ai/dsh-* to 0.2.0-rc.2)
+pnpm build          # tsc -p tsconfig.json && tsdown: host ESM (lib/{index,invariant}.js) + browser bundle (lib/client.js)
+pnpm typecheck      # tsc --noEmit
+pnpm test           # vitest run — the unit lane
+pnpm verify:client  # execute the real lib/client.js through a stand-in module loader and check the browser-kernel contract
+pnpm check          # typecheck + test + build + verify:client — the full local gate (mirrors CI's build job)
 ```
 
 Run a single test file:
@@ -31,7 +33,13 @@ pnpm vitest run tests/sanitize.spec.ts
 pnpm vitest run tests/ghost.client.spec.tsx
 ```
 
-Note: `tests/provider.e2e.ts` is a manual end-to-end test and is **excluded** from the Vitest run via `vitest.config.ts`. The full test matrix runs inside the harness monorepo; this repo is the source-of-record copy.
+Two test lanes with separate Vitest configs:
+
+- **Unit lane** (`vitest.config.ts`, `pnpm test`): `tests/**/*.spec.{ts,tsx}`. Excludes `**/tests/e2e/**` and the legacy manual `tests/provider.e2e.ts`.
+- **E2E lane** (`vitest.e2e.config.ts`, `pnpm test:e2e` / `pnpm test:e2e:local`): `tests/e2e/**/*.e2e.ts` only. Spawns a **real** `dsh web` and drives the WebUI with Playwright; requires `DEEPSEEK_API_KEY` (suite is `skipIf`-gated on it).
+  - `tests/e2e/suggest.e2e.ts` (CI lane): isolated `$DSH_HOME` in a tmpdir — never touches the real `~/.dsh`. Installs the bundle via `dsh plugin --profile web add`, walks the first-run onboarding to store the key, connects a workspace, sets the model on the 建议提示词 card, then asserts the ghost suggestion appears, the native placeholder is hidden (no double ghost text), and Tab adopts the suggestion. Failure evidence (screenshot + page-state JSON) is saved under `.artifacts/`.
+  - `tests/e2e/suggest-local.e2e.ts` (local lane): runs against the developer's **real** `~/.dsh` and writes to the real `~/.dsh/settings.yaml` (an intentional side effect); assumes dsh is globally installed and already configured. Headful on macOS.
+- In CI, the `build` job (typecheck/test/build on Node 22+24) is the **gate**; the e2e job is `continue-on-error` (needs the live model + secret) and is a signal only. CI installs with `--ignore-scripts` because the root `prepare` script runs `pnpm build`.
 
 ## Architecture
 
@@ -41,16 +49,18 @@ Note: `tests/provider.e2e.ts` is a manual end-to-end test and is **excluded** fr
 - `dsh.bundle` in `package.json` (`patch: ./cordis.patch.yml`) makes the package a one-command bundle: `dsh plugin --profile web add <git-url>` installs it and `reconcilePlugins` auto-appends it to the profile's `bundles` list. The browser half is discovered via the `dsh.client` declaration (`exports["./client"]`), so `cordis.patch.yml` only inserts the host entry. `dsh.client.inject` lists only the packages whose client bundle must be loaded first (`@deepseek-ai/dsh-client-ui-conversation`); the type-only `dsh-client-*` packages are deliberately not listed.
 - The desktop profile (`~/.dsh/profiles/desktop`) is managed by the Electron app, so install it the same way a manual `link:` layer is composed: add a `link:` dependency plus a `dsh.profile.bundles` entry in the profile's `package.json`, and symlink the package into the profile's `node_modules/@studyzy/` (the desktop profile does not run `pnpm install` on demand). The app must be restarted for a newly linked bundle to load.
 - The `vitest.config.ts` aliases the single package's outlets to their **source** (not `lib/`) and `inline`s `@deepseek-ai/dsh-client-*` deps so tests run against source without a prior build and so CSS modules resolve under jsdom.
+- `scripts/verify-client-bundle.mjs` (`pnpm verify:client`) executes the **built** `lib/client.js` through a stand-in module loader: the bundle must register a factory under the plugin id, `require` only modules the shell seeds (the `PLATFORM_MODULES` list), and export the face the kernel activates; it also cross-checks that `dsh.client` and `exports["./client"]` agree. These contract violations fail only at page load for the user — not in `pnpm typecheck` / `test` / `build` — so run `verify:client` (or `pnpm check`) after touching the client bundle or the manifest.
 
 ### Host half (`src/`)
 
 One file per responsibility:
 
-- `index.ts` — the Cordis plugin `apply(ctx)`: scopes the body to `sessionProjections`, wires the `turn/end` handler, dedup/abort state per session, and registers both projection units (`suggestPrompt` for the client, host-only `suggestPromptTranscript`). No settings-registration helper is needed in `dsh >= 0.2.0`: the entry's `config` **is** the settings-backed value, keyed by the profile entry id (`suggest-prompt`). The projection-key type merge is re-exported via `export type * from './types.ts'` at the package root.
+- `index.ts` — the Cordis plugin `apply(ctx)`: refuses to mount on a harness without `appendPluginRecord` (warns once, wires nothing — see the records.ts entry), otherwise scopes the body to `sessionProjections`, wires the `turn/end` handler, dedup/abort state per session, and registers both projection units (`suggestPrompt` for the client, host-only `suggestPromptTranscript`). No settings-registration helper is needed in `dsh >= 0.2.0`: the entry's `config` **is** the settings-backed value, keyed by the profile entry id (`suggest-prompt`). The projection-key type merge is re-exported via `export type * from './types.ts'` at the package root.
 - `types.ts` — single home of the `SuggestPromptSuggestion` / projection-key declarations shared by host and browser, plus the host-only `SuggestPromptTranscriptState`.
-- `domain.ts` — `SuggestPromptRequested` / `SuggestPromptSuggested` event payload types, plus this package's `MessageSourceMap` entry (`kind: 'suggest-prompt'`) — `dsh >= 0.2.0` removed the catch-all `plugin` source kind.
+- `domain.ts` — the `SuggestPromptSuggested` record payload type, plus this package's `MessageSourceMap` entry (`kind: 'suggest-prompt'`) — `dsh >= 0.2.0` removed the catch-all `plugin` source kind.
+- `records.ts` — the plugin-record seam: `SUGGEST_RECORD_TYPE` (`plugin:suggest-prompt/suggested`), the structurally-typed probe of the harness's `appendPluginRecord` (namespace import, because a named ESM import of a missing export fails at module link), `canAppendRecords()` (the dormancy gate), `appendSuggestedRecord`, and the read side (`suggestedRecordOf` + `isValidSuggestedPayload` — a restored record is owner-validated data an earlier build may have written). `useRecordWriterForTests` is the stand-in seam the pinned rc.2 devDependency needs.
 - `transcript.ts` — the host-only `suggestPromptTranscript` fold: `applyTranscriptProjection` retains, per committed event, the newest completed turn, its start boundary, and the redacted user/assistant pairs inside a bounded window. This replaces the old `session.events` scan because `dsh >= 0.2.0` deprecates synchronous history reads for new production callers (see the harness note `2026-09-09-deprecate-synchronous-session-event-reads`).
-- `generate.ts` — the bounded generation pipeline: config validation (`resolveSuggestPromptConfig`), transcript building over fold state, route resolution (inherits main request route when `provider`/`model` unset), deadline-fused dispatch via `ctx.llm`, and reasoning disabled (`ReasoningEffortId('off')`, retried once without the field if rejected). Mirrors the `session-title-llm` call policy so the "model-visible ⟺ logged" invariant holds. `deepFreeze` now comes from `@deepseek-ai/dsh-util-values` (it left `dsh-llm`).
+- `generate.ts` — the bounded generation pipeline: config validation (`resolveSuggestPromptConfig`), transcript building over fold state, route resolution (inherits main request route when `provider`/`model` unset), deadline-fused dispatch via `ctx.llm`, and reasoning disabled (`ReasoningEffortId('off')`, retried once without the field if rejected). The only durable trace is the single suggestion record written through `appendSuggestedRecord`; nothing is logged pre-dispatch. `deepFreeze` comes from `@deepseek-ai/dsh-util-values` (it left `dsh-llm`).
 - `sanitize.ts` — pure functions: `redactSecrets` (masks AWS/OpenAI/GitHub/Slack/JWT/Stripe secret shapes), `sanitizeSuggestion` (strips control sequences/fences/quotes, collapses to one line), `cleanSuggestion`, `shouldFilterSuggestion` (semantic filter: meta-text, evaluative filler, assistant voice → "no suggestion"), `hasCJK` (reply-language selection).
 - `invariant.ts` — package invariant (fail-loud stream checks). It validates committed delivery only: an install-time scan of pre-existing sessions is prohibited now that synchronous history reads are deprecated.
 
@@ -79,7 +89,7 @@ These are the seams that broke on the 0.1.1 → 0.2.0 upgrade; keep them in sync
 ### Key invariants / behavioral rules
 
 - **Last turn only**: by default only the last completed turn's user input + assistant final answer are sent (`maxRecentTurns` default `1`); intermediate tool calls/reasoning are never included.
-- **Silent no-suggestion is normal**: empty or filtered model replies skip quietly — no event, no warning, projection stays `null`.
+- **Silent no-suggestion is normal**: empty or filtered model replies skip quietly — no record, no warning, projection stays `null`.
 - **One in-flight generation per session**; the next completed turn aborts (supersedes) the previous one.
-- **Pre-dispatch logging**: exact framed input + system prompt are recorded in `suggest-prompt/request` before dispatch (model-visible ⟺ logged invariant).
+- **One ignorable record, nothing else**: the suggestion is persisted via `appendPluginRecord` as `plugin:suggest-prompt/suggested` (`src/records.ts`; `dsh >= 0.2.1`). No other session-log write is ever made — private `SessionEventMap` events wedged sessions on cold read (issue #4). On a harness without the record API (0.2.0-rc.2) the plugin is fully dormant: `apply` warns once and wires nothing.
 - **Re-arm without a call**: deleting back to an empty draft re-shows the persisted suggestion with no new model request.

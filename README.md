@@ -123,7 +123,8 @@ dsh plugin --profile web add @studyzy/dsh-suggest-prompt
 ## 工作方式
 
 - 宿主在 `turn/end`（reason=`completed`）时触发生成；按会话 + 回合去重，下一个完成回合会中止上一个在途生成。
-- 建议写入会话日志的 `suggest-prompt/suggested` 事件，`suggestPrompt` 投影把它暴露给 Web 端。
+- 建议以**单条可忽略（ignorable）插件记录**（`plugin:suggest-prompt/suggested`，经 `appendPluginRecord` 写入，要求 `dsh >= 0.2.1`）进入会话日志：不认识的读者会保留并跳过它，不进入模型可见面，会话始终可正常打开；`suggestPrompt` 投影把它暴露给 Web 端。插件不写任何其他会话数据。
+- 在没有该记录 API 的 harness（`0.2.0-rc.2`）上插件保持完全休眠：挂载时告警一次，不调用模型、不写日志——因为以私有事件类型写日志会让会话在冷读取时被整体拒绝（issue #4）。
 - 喂给辅助调用的对话记录由**仅宿主端**的 `suggestPromptTranscript` 投影从已提交事件增量折叠而来，而不再扫描会话历史：`dsh >= 0.2.0` 禁止新生产代码同步读取历史事件。该折叠同时约束内存，只保留最近约 4 个回合。
 - 幽灵文字在 agent 空闲且草稿为空时显示；键入即隐藏，删回空草稿重新显示。`dsh >= 0.2.0` 移除了客户端的 `turnEnds` 映射，因此新鲜度改由空闲标志判断，而非本地比对完成回合。
 - 显示建议时，输入框的原生占位文字会被隐藏（用 `visibility`，不引起重排）；否则两者会绘制在同一文字起点上，谁都看不清。
@@ -134,7 +135,6 @@ dsh plugin --profile web add @studyzy/dsh-suggest-prompt
 
 - **系统提示词**：把模型限定为「以用户口吻预测下一条提示词」，禁止生成内容或元文本，给出具体正反例；回复语言跟随会话（最后一条用户消息含 CJK → `简体中文`，否则 `English`）。
 - **模型看到的输入**：默认只有最后一轮的 `[User Message]` / `[Assistant Response]` 带标签块（已脱敏、受 `maxTranscriptChars` 约束）。
-- **请求前记录**：确切的框架化输入与系统提示在派发前写入 `suggest-prompt/request` 事件，满足「模型可见 ⟺ 日志可重建」。
 - **免思考**：辅助请求默认携带 `reasoningEffort: off`（DeepSeek 序列化为 `thinking: disabled`），追求快速与低成本；模型不支持时自动去掉该字段重试一次（拒绝发生在任何网络 I/O 之前，几乎无额外开销）。
 - **成本**：每个完成回合至多一次辅助请求，受 `maxInputBytes` / `maxOutputTokens` 约束；主 agent 请求不增加任何 token。
 
@@ -148,7 +148,7 @@ dsh plugin --profile web add @studyzy/dsh-suggest-prompt
 
 - 每个完成回合都会生成（与输入框是否已有内容无关），幽灵文字只在草稿为空时显示。
 - 被中止（取代）的生成不会为较早回合留下建议。
-- 空回复或被过滤的回复 = 该回合无建议：不写 `suggest-prompt/suggested` 事件，投影保持 `null`，也不记录警告。
+- 空回复或被过滤的回复 = 该回合无建议：不写建议记录，投影保持 `null`，也不记录警告。
 - 投影保留最后一条建议：重新打开旧会话会显示其最终建议，且不发起新的模型调用。
 - 建议模型的路由与预算由部署配置决定；无法关闭思考的模型（如部分 pi-ai 路由）会回退为模型默认的推理行为，想获得最快的建议体验，建议选支持关闭思考的路由（如内置 DeepSeek）。
 
@@ -297,7 +297,8 @@ The following are provided with defaults by the bundle's own `cordis.patch.yml` 
 ## How it works
 
 - The host triggers generation on `turn/end` (reason `completed`), deduplicated per session and turn; the next completed turn aborts the in-flight generation.
-- The suggestion is appended to the session log as the `suggest-prompt/suggested` event, and the `suggestPrompt` projection exposes it to the web side.
+- The suggestion enters the session log as a **single ignorable plugin record** (`plugin:suggest-prompt/suggested`, written through `appendPluginRecord`, requires `dsh >= 0.2.1`): readers that do not know it retain and skip it, it never joins the model-visible surface, and the session always reopens; the `suggestPrompt` projection exposes it to the web side. The plugin writes nothing else to the session log.
+- On a harness without that record API (`0.2.0-rc.2`) the plugin stays fully dormant: it warns once at mount and makes no LLM call and no log write — writing private event types made sessions unreadable on cold read (issue #4).
 - The transcript fed to the auxiliary call is maintained as a host-only `suggestPromptTranscript` projection folded from committed events, rather than by scanning session history: `dsh >= 0.2.0` deprecates synchronous history reads for new production callers. The fold also bounds memory, keeping roughly the last four turns.
 - The ghost text shows while the agent is idle and the draft is empty; typing hides it, deleting back to an empty draft re-shows it. `dsh >= 0.2.0` removed the client's `turnEnds` map, so freshness comes from the idle flag rather than a local completed-turn comparison.
 - While a suggestion is displayed, the composer's native placeholder is hidden (via `visibility`, so nothing reflows) — otherwise the two would paint on the same text origin and neither would be readable.
@@ -308,7 +309,6 @@ The following are provided with defaults by the bundle's own `cordis.patch.yml` 
 
 - **System prompt**: binds the model to predicting the user's next prompt in the user's own voice, forbids generating content or meta-text, and gives concrete examples and anti-examples; the reply language follows the conversation (`简体中文` when the last user message contains CJK, otherwise `English`).
 - **What the model sees**: by default only the last turn, framed as labelled `[User Message]` / `[Assistant Response]` blocks (redacted, bounded by `maxTranscriptChars`).
-- **Pre-dispatch logging**: the exact framed input and system prompt are recorded in the `suggest-prompt/request` event before dispatch, satisfying the model-visible ⟺ logged invariant.
 - **No thinking**: the auxiliary request carries `reasoningEffort: off` by default (DeepSeek serializes it as `thinking: disabled`) for speed and low cost; a model that rejects `off` retries once without the field (the rejection happens before any network I/O, so the retry is nearly free).
 - **Cost**: at most one auxiliary request per completed turn, bounded by `maxInputBytes` / `maxOutputTokens`; the main agent request gains zero tokens.
 
@@ -322,7 +322,7 @@ The following are provided with defaults by the bundle's own `cordis.patch.yml` 
 
 - Generation runs after every completed turn regardless of whether the composer already holds text; the ghost text is only *displayed* while the draft is empty.
 - A superseded (aborted) generation leaves no suggestion for the older turn.
-- An empty or filtered reply means "no suggestion" for that turn: no `suggest-prompt/suggested` event is written, the projection stays `null`, and no warning is logged.
+- An empty or filtered reply means "no suggestion" for that turn: no record is written, the projection stays `null`, and no warning is logged.
 - The projection persists the last suggestion, so reopening an old session shows its final suggestion without a new model call.
 - The suggestion route and budget are deployment configuration; a model that cannot turn thinking off (some pi-ai routes) falls back to its default reasoning behavior — for the fastest suggestions, pick a route that supports `off` (such as the built-in DeepSeek).
 

@@ -25,7 +25,7 @@
  * @module @studyzy/dsh-suggest-prompt/types
  */
 
-/** The suggestion generated after one completed turn, whole-value per event. */
+/** The suggestion generated after one completed turn, whole-value per record. */
 export interface SuggestPromptSuggestion {
   /** Completed turn whose completion this suggestion answers. */
   readonly turn: number
@@ -37,8 +37,6 @@ export interface SuggestPromptSuggestion {
   readonly truncated: boolean
   /** Exact auxiliary LLM route. */
   readonly route?: { readonly provider: string; readonly model: string }
-  /** Seq of the matching `suggest-prompt/request` event. */
-  readonly requestSeq: number
   /**
    * Composer shortcut that accepts this suggestion into the draft (for
    * example `Tab` or `Alt+Slash`), as configured on the host plugin. The
@@ -48,10 +46,10 @@ export interface SuggestPromptSuggestion {
 }
 
 /**
- * The `suggestPrompt` projection value: the latest `suggest-prompt/suggested`
- * whole value, or `null` before the first suggestion. The client ghost text
- * reads this; stale suggestions are matched against the session's latest
- * completed turn by `turn`.
+ * The `suggestPrompt` projection value: the latest suggestion record's whole
+ * value (`plugin:suggest-prompt/suggested`), or `null` before the first
+ * suggestion. The client ghost text reads this; stale suggestions are matched
+ * against the session's latest completed turn by `turn`.
  */
 export type SuggestPromptProjection = SuggestPromptSuggestion | null
 
@@ -85,7 +83,7 @@ export interface SuggestPromptTranscriptState {
   readonly turnStarts: readonly { readonly turn: number; readonly seq: number }[]
   /** Retained model-visible pairs, oldest first, bounded by a fixed window. */
   readonly entries: readonly SuggestPromptTranscriptEntry[]
-  /** Newest `suggest-prompt/suggested` turn, or `-1`; the dedupe cursor. */
+  /** Newest suggestion record turn, or `-1`; the dedupe cursor. */
   readonly lastSuggestedTurn: number
 }
 
@@ -93,9 +91,9 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     /**
      * The session's latest suggested next prompt (the whole value of the
-     * newest `suggest-prompt/suggested` event), or `null` before the first
-     * suggestion. Whole-value rule: every suggested event carries the
-     * complete post-change suggestion, so the fold is last-wins.
+     * newest `plugin:suggest-prompt/suggested` record), or `null` before the
+     * first suggestion. Whole-value rule: every record carries the complete
+     * post-change suggestion, so the fold is last-wins.
      */
     suggestPrompt: SuggestPromptProjection
   }

@@ -21,6 +21,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session/surface'
 import type { Message } from '@deepseek-ai/dsh-llm'
+import { isValidSuggestedPayload, suggestedRecordOf } from './records.ts'
 import type { SuggestPromptTranscriptEntry, SuggestPromptTranscriptState } from './types.ts'
 import { redactSecrets } from './sanitize.ts'
 
@@ -121,11 +122,13 @@ export function applyTranscriptProjection(
       if (entry === undefined) return state
       return { ...state, entries: [...state.entries, entry] }
     }
-    case 'suggest-prompt/suggested':
-      return { ...state, lastSuggestedTurn: event.data.turn }
-    default:
-      // Returning the SAME reference is the projection-contract requirement:
-      // an unretained event must produce no downstream work.
-      return state
+    default: {
+      // Suggestion records advance the dedupe cursor. A malformed record (a
+      // restored record is owner-validated data) must not mark its turn
+      // suggested, or that turn would never regenerate.
+      const record = suggestedRecordOf(event)
+      if (record === undefined || !isValidSuggestedPayload(record)) return state
+      return { ...state, lastSuggestedTurn: record.turn }
+    }
   }
 }

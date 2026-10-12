@@ -17,6 +17,7 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE, TRANSCRIPT_RETAINED_TURNS } from '../src/transcript.ts'
+import { SUGGEST_RECORD_TYPE } from '../src/records.ts'
 import { buildTranscript } from '../src/generate.ts'
 
 /** Fold one session's committed events into the transcript state. */
@@ -120,10 +121,19 @@ describe('applyTranscriptProjection', () => {
     const session = Session.create(SessionId('cursor'))
     appendTurn(session, 1, '问', '答')
     expect(fold(session).lastSuggestedTurn).toBe(-1)
-    session.append('suggest-prompt/suggested', {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, requestSeq: 1, acceptKey: 'Tab',
+    session.append(SUGGEST_RECORD_TYPE, {
+      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
     })
     expect(fold(session).lastSuggestedTurn).toBe(1)
+  })
+
+  it('does not advance the cursor for a malformed suggestion record', () => {
+    const session = Session.create(SessionId('bad-record'))
+    appendTurn(session, 1, '问', '答')
+    // A restored record carries whatever JSON an earlier build wrote; a turn
+    // it fails to mark must stay eligible for regeneration.
+    session.append(SUGGEST_RECORD_TYPE, { version: 1, turn: 'bad' } as never)
+    expect(fold(session).lastSuggestedTurn).toBe(-1)
   })
 })
 

@@ -22,7 +22,6 @@ const SUGGESTION: NonNullable<SuggestPromptProjection> = {
   baseSeq: 40,
   text: '继续修复登录页',
   truncated: false,
-  requestSeq: 42,
   acceptKey: 'Tab',
 }
 

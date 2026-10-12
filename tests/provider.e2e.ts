@@ -5,6 +5,7 @@ import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
+import { installTestRecordWriter } from './records.ts'
 
 const contexts: Context[] = []
 
@@ -14,6 +15,9 @@ afterEach(async () => {
 
 describe.skipIf(!process.env.DEEPSEEK_API_KEY)('suggest-prompt with real DeepSeek API', () => {
   it('generates a non-empty suggestion from a real DeepSeek call', async () => {
+    // Legacy manual lane (excluded from `pnpm test`); the stand-in writer
+    // supplies the record API the pinned devDependency predates.
+    installTestRecordWriter()
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(LlmRuntime)
@@ -45,10 +49,10 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('suggest-prompt with real DeepSee
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
     await new Promise(resolve => setTimeout(resolve, 0))
-    const suggested = session.events
-      .filter(event => event.type === 'suggest-prompt/suggested')
-      .map(event => event.data)
+    const suggested = session.snapshotEvents()
+      .filter(event => (event as { type: string }).type === 'plugin:suggest-prompt/suggested')
+      .map(event => (event as { data: { text: string } }).data)
     expect(suggested).toHaveLength(1)
-    expect((suggested[0] as { text: string }).text.length).toBeGreaterThan(0)
+    expect(suggested[0]?.text.length).toBeGreaterThan(0)
   })
 })

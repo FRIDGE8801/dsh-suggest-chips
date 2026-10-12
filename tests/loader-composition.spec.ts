@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -12,6 +12,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
 import { Config } from '@studyzy/dsh-suggest-prompt'
+import { installTestRecordWriter, restoreRecordWriter, suggestedRecords } from './records.ts'
 
 /**
  * Mirror the host's `volatileForm()` projection: walk a schema and report the
@@ -59,7 +60,12 @@ class LoaderAdapter extends LlmAdapter {
   }
 }
 
+beforeEach(() => {
+  installTestRecordWriter()
+})
+
 afterEach(async () => {
+  restoreRecordWriter()
   await context?.fiber.dispose()
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
@@ -142,9 +148,7 @@ describe('suggest-prompt Loader composition', () => {
     // `snapshotEvents()` is the sanctioned inspection reader for repository tests
     // (rc.2 removed the bare `events` accessor and prohibits new synchronous
     // history reads in production code).
-    const suggested = session.snapshotEvents()
-      .filter(event => event.type === 'suggest-prompt/suggested')
-      .map(event => event.data)
+    const suggested = suggestedRecords(session)
     expect(suggested).toHaveLength(1)
     expect(suggested[0]).toMatchObject({ turn: 1, text: 'Loader composed suggestion' })
     expect(ctx.sessionProjections.snapshot(session).values.suggestPrompt).toMatchObject({

@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
+import { SUGGEST_RECORD_TYPE, isValidSuggestedPayload } from './records.ts'
 
 const PACKAGE_NAME = '@studyzy/dsh-suggest-prompt'
 
@@ -11,46 +12,17 @@ export const name = 'suggest-prompt-invariant'
 /** Service required before the companion can reserve package ownership. */
 export const inject = ['invariants']
 
-/** One integer payload field (turn/baseSeq/requestSeq/maxTokens are counts). */
-function isInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0
-}
-
-/** One non-empty route pair. */
-function isRoute(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) return false
-  const record = value as Record<string, unknown>
-  return typeof record['provider'] === 'string' && record['provider'].length > 0
-    && typeof record['model'] === 'string' && record['model'].length > 0
-}
-
-/** Validate one suggest-prompt event payload before it reaches the durable log. */
+/**
+ * Validate one suggest-prompt plugin record payload before it reaches the
+ * durable log. Only this package's record type is checked; the `ignorable`
+ * marker itself is guaranteed by the harness's `appendPluginRecord`, not by
+ * this package's code.
+ */
 function validateEvent(event: SessionEvent, fail: InvariantFailure): void {
-  if (event.type !== 'suggest-prompt/request' && event.type !== 'suggest-prompt/suggested') return
-  const data = event.data as unknown as Record<string, unknown>
-  if (data.version !== 1) {
-    fail(`suggest-prompt/${event.type.slice('suggest-prompt/'.length)} carries unsupported version ${JSON.stringify(data.version)}`)
-    return
-  }
-  if (event.type === 'suggest-prompt/request') {
-    if (!isInteger(data.turn)
-      || !Array.isArray(data.sourceMessageSeqs) || !data.sourceMessageSeqs.every(isInteger)
-      || !isRoute(data.route)
-      || typeof data.system !== 'string' || data.system.length === 0
-      || !Array.isArray(data.messages) || data.messages.length === 0
-      || !isInteger(data.maxTokens)
-      // Optional so events logged before `reasoningOff` existed stay valid;
-      // when present it must be the boolean the write side records.
-      || (data.reasoningOff !== undefined && typeof data.reasoningOff !== 'boolean')) {
-      fail('suggest-prompt/request carries an invalid request payload')
-    }
-    return
-  }
-  if (!isInteger(data.turn) || !isInteger(data.baseSeq)
-    || typeof data.text !== 'string' || data.text.length === 0
-    || typeof data.truncated !== 'boolean'
-    || !isInteger(data.requestSeq)) {
-    fail('suggest-prompt/suggested carries an invalid suggestion payload')
+  if ((event as { readonly type: string }).type !== SUGGEST_RECORD_TYPE) return
+  const data = (event as { readonly data: unknown }).data
+  if (!isValidSuggestedPayload(data)) {
+    fail('plugin:suggest-prompt/suggested carries an invalid suggestion payload')
   }
 }
 
@@ -58,9 +30,10 @@ function validateEvent(event: SessionEvent, fail: InvariantFailure): void {
  * Install validation for newly committed suggest-prompt state.
  *
  * Only committed delivery is validated, matching the `dsh >= 0.2.0` invariant
- * shape: the `internal/dispatch` tap sees every `session/event` (including the
- * replay of a resumed log), while scanning each Session's history with
- * `session.events` is prohibited for new production callers.
+ * shape: the `internal/dispatch` tap sees every `session/event` (including
+ * plugin records, which share the ordinary commit path, and the replay of a
+ * resumed log), while scanning each Session's history with `session.events`
+ * is prohibited for new production callers.
  */
 const install: InvariantInstaller = Object.assign((ctx: Context, fail: InvariantFailure) => {
   ctx.on('internal/dispatch', (_mode, eventName, args) => {

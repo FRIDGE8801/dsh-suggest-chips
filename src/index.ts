@@ -2,10 +2,13 @@
  * suggest-prompt plugin: after every completed agent turn, generate one
  * suggested next prompt for the user through a bounded auxiliary LLM call and
  * publish it as the `suggestPrompt` session projection (the web composer
- * renders it as ghost placeholder text). Host-driven on `turn/end` (completed); generation
- * is per-session deduplicated by turn and superseded on the next completed
- * turn. The projection unit activates only where a projection registry is
- * composed (headless assemblies stay unaffected).
+ * renders it as ghost placeholder text). The suggestion reaches the log as a
+ * single ignorable plugin record (`plugin:suggest-prompt/suggested`,
+ * dsh >= 0.2.1) — never as a `SessionEventMap` event, whose unknown type
+ * wedged sessions on cold read (issue #4). Host-driven on `turn/end`
+ * (completed); generation is per-session deduplicated by turn and superseded
+ * on the next completed turn. The projection unit activates only where a
+ * projection registry is composed (headless assemblies stay unaffected).
  * @module @studyzy/dsh-suggest-prompt
  */
 
@@ -18,6 +21,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { generateSuggestion, resolveSuggestPromptConfig } from './generate.ts'
+import { canAppendRecords, isValidSuggestedPayload, suggestedRecordOf } from './records.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from './transcript.ts'
 import type { SuggestPromptSuggestion, SuggestPromptTranscriptState } from './types.ts'
 
@@ -39,7 +43,6 @@ const suggestPromptProjectionSchema: ZodType<SuggestPromptSuggestion | null> = z
       provider: zod.string().min(1),
       model: zod.string().min(1),
     }).optional(),
-    requestSeq: zod.number().int().nonnegative(),
     acceptKey: zod.string().min(1),
   }),
   zod.null(),
@@ -67,29 +70,28 @@ const transcriptStateSchema: ZodType<SuggestPromptTranscriptState> = zod.object(
 
 /**
  * Light last-wins fold of the `suggestPrompt` projection unit. The state is
- * plain JSON; any non-suggested event returns the same reference (the
- * registry's Object.is gate), and correctness of the written suggestion is
- * the write side's job (generateSuggestion sanitized and truncated it before
- * appending; the package invariant rejects a violating stream fail-loud where
- * it is installed).
+ * plain JSON; any non-record event returns the same reference (the registry's
+ * Object.is gate). A restored record carries whatever JSON an earlier build
+ * wrote, so the payload passes `isValidSuggestedPayload` before it is
+ * trusted — a malformed record is ignored, never folded into the state.
  * @param state - the projection covering all prior events.
  * @param event - the next committed session event.
- * @returns the next projection (same reference when the event is not a suggestion).
+ * @returns the next projection (same reference when the event is not a
+ *   well-formed suggestion record).
  */
 export function applySuggestPromptProjection(
   state: SuggestPromptSuggestion | null,
   event: SessionEvent,
 ): SuggestPromptSuggestion | null {
-  if (event.type !== 'suggest-prompt/suggested') return state
-  const data = event.data
+  const record = suggestedRecordOf(event)
+  if (record === undefined || !isValidSuggestedPayload(record)) return state
   return {
-    turn: data.turn,
-    baseSeq: data.baseSeq,
-    text: data.text,
-    truncated: data.truncated,
-    ...(data.route !== undefined ? { route: data.route } : {}),
-    requestSeq: data.requestSeq,
-    acceptKey: data.acceptKey,
+    turn: record.turn,
+    baseSeq: record.baseSeq,
+    text: record.text,
+    truncated: record.truncated,
+    ...(record.route !== undefined ? { route: record.route } : {}),
+    acceptKey: record.acceptKey,
   }
 }
 
@@ -181,6 +183,12 @@ export const SUGGEST_PROMPT_NS = 'suggest-prompt'
  * Mount the plugin: listen for completed turns, generate per-session
  * suggestions, and register the `suggestPrompt` projection unit.
  *
+ * On a harness without `appendPluginRecord` (0.2.0-rc.2 and older) the plugin
+ * stays fully dormant: its only delivery channel would be a private event
+ * type the harness refuses on cold read, wedging the session (issue #4). It
+ * warns once and wires nothing — no turn listener, no LLM calls, no log
+ * writes.
+ *
  * Policy resolution has no settings-service plumbing here by design: in
  * `dsh >= 0.2.0` the composition entry's `config` IS the settings-backed value.
  * The loader re-resolves the entry config when the settings document changes,
@@ -189,6 +197,14 @@ export const SUGGEST_PROMPT_NS = 'suggest-prompt'
  * @param config - required bounded-generation policy.
  */
 export function apply(ctx: Context, config: Config): void {
+  if (!canAppendRecords()) {
+    ctx.logger.warn(
+      'suggest-prompt: the running harness cannot persist ignorable plugin records'
+      + ' (needs dsh >= 0.2.1 with appendPluginRecord); suggestion generation stays'
+      + ' disabled so completed sessions remain readable',
+    )
+    return
+  }
   // Everything runs under the projection registry: generation reads the
   // retained transcript from `suggestPromptTranscript` rather than scanning
   // session history, so an assembly without the registry cannot generate. The
@@ -239,7 +255,7 @@ function applyWithProjections(ctx: Context, config: Config): void {
     const resolved = resolveSuggestPromptConfig(config)
     // session/event is dispatched synchronously inside the committing append;
     // re-appending from that stack reenters the session. Defer to a microtask
-    // so the suggestion's own request/suggested events publish cleanly.
+    // so the suggestion record's own commit publishes cleanly.
     void Promise.resolve().then(() => {
       // The transcript fold reflects every event up to and including this
       // turn/end, so reading it here yields the completed turn's messages.
@@ -280,7 +296,9 @@ function applyWithProjections(ctx: Context, config: Config): void {
 
   // The `suggestPrompt` projection unit: last-wins fold of whole values (see
   // applySuggestPromptProjection). Registered here because the whole plugin
-  // body is scoped to the projection registry.
+  // body is scoped to the projection registry. stateVersion 2: the fold state
+  // dropped `requestSeq` when suggestions moved to plugin records, so cached
+  // rows written by the event-based unit are discarded, not forward-applied.
   ctx.sessionProjections.register<'suggestPrompt', SuggestPromptSuggestion | null>({
     key: 'suggestPrompt',
     // dsh >= 0.2.0 projection contract: the persistable state schema is
@@ -294,7 +312,7 @@ function applyWithProjections(ctx: Context, config: Config): void {
       viewSchema: suggestPromptProjectionSchema,
       view: state => state,
     },
-    stateVersion: 1,
+    stateVersion: 2,
   })
 
   // Host-only companion fold: the retained transcript that generation reads in

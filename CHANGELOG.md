@@ -10,8 +10,34 @@ version it targets.
 
 ## [Unreleased]
 
-Targets `dsh 0.2.0-rc.2` (unchanged): the move below only changes which slots the
-client card registers into, not the harness contract.
+## [1.2.0] - 2026-10-12
+
+Targets `dsh 0.2.1-alpha.1+` for generation; everything else (settings card,
+client bundle) still works on `dsh 0.2.0-rc.2`. The move below only changes which
+slots the client card registers into, not the harness contract.
+
+### Fixed
+
+- **Suggestions no longer make the session log unreadable ([#4]).** The plugin
+  used to append private `suggest-prompt/request` / `suggest-prompt/suggested`
+  events through `Session.append`. Those types are outside the harness's closed
+  `KNOWN_SESSION_EVENT_TYPES` and rc.2 offers no way to mark an appended event
+  `ignorable`, so `validateStoredEvents` refused the whole log on the next cold
+  read — every session that completed one suggestion became unloadable. Now the
+  plugin writes nothing but a single ignorable plugin record
+  (`plugin:suggest-prompt/suggested`, via `appendPluginRecord`, `dsh >= 0.2.1`):
+  unknown readers retain and skip it, it never joins the model-visible surface,
+  and the projection folds still consume it through `session/event`. On a
+  harness without that API (0.2.0-rc.2) the plugin stays fully dormant — one
+  warning at mount, no LLM call, no log write — because an auxiliary call whose
+  only delivery channel wedges the session is worse than no suggestion. The
+  pre-dispatch request logging (`suggest-prompt/request`) is gone; the
+  `requestSeq` field left the suggestion payload and the `suggestPrompt`
+  projection (stateVersion bumped to 2, stale cached rows are discarded).
+  Sessions already wedged by the old build keep their three non-ignorable rows
+  and still need a hand edit (marking them `ignorable: true` restores them).
+
+[#4]: https://github.com/studyzy/dsh-suggest-prompt/issues/4
 
 ### Changed
 
