@@ -10,6 +10,23 @@ version it targets.
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-10-19
+
+### Fixed
+
+- **Installing the plugin no longer disables the web profile's own plugins.**
+  1.2.1 declared `@deepseek-ai/dsh-client-connection` and
+  `@deepseek-ai/dsh-storage-domain` as direct dependencies so the storage-domain
+  import could resolve inside an installed profile. That was the wrong vehicle:
+  the copies landed in the profile's `node_modules`, shadowed the host's own
+  rows, and any dsh runtime bump (e.g. 0.2.1-rc.2 over 0.2.0-rc.2) then disabled
+  the rows as exact-version incompatible — cascading into the whole web profile
+  failing to activate. Harness-internal `@deepseek-ai/dsh-*` packages are
+  host-resolved (the loader resolves the plugin's bare imports against the host
+  install, exactly as 1.1.0 already relied on for `dsh-llm`/`dsh-session`), so
+  they belong in `peerDependencies`/`devDependencies` only. The entries stay in
+  `devDependencies` for local builds; they no longer ship.
+
 ## [1.2.0] - 2026-10-12
 
 Targets `dsh 0.2.1-alpha.1+` for generation; everything else (settings card,
