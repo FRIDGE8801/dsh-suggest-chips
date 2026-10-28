@@ -10,6 +10,16 @@ version it targets.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The harness runtime packages are declared as peers, and a test keeps them
+  that way.** 1.2.3 stopped installing `@deepseek-ai/dsh-client-connection` and
+  `@deepseek-ai/dsh-storage-domain` alongside the plugin but did not declare them
+  in `peerDependencies` as the other fifteen harness packages are.
+  `tests/package-manifest.spec.ts` now enforces both halves: no
+  `@deepseek-ai/dsh*` entry in `dependencies`, and a version *range* (never an
+  exact pin) for each harness package the plugin imports while the host runs it.
+
 ## [1.2.3] - 2026-10-19
 
 ### Fixed
