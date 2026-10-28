@@ -3,9 +3,6 @@ lib/
 *.tsbuildinfo
 .coverage/
 .idea/
-test-results/
-playwright-report/
-.artifacts/
 # Local pnpm content store, used when `pnpm install` must run without a
 # writable global store (sandboxed/offline machines). Never committed.
 .pnpm-store/

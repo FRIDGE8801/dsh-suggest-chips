@@ -5,7 +5,7 @@
  * registers the route and the browser half calls it, and the client bundle may
  * only `require` the shell-seeded platform modules — so this module must stay
  * plain constants and types that both programs can include.
- * @module @studyzy/dsh-suggest-prompt/rpc-contract
+ * @module dsh-suggest-chips/rpc-contract
  */
 
 /**
@@ -26,23 +26,9 @@
  * connection's own `fetchRoutes` map, so it carries no such dependency — and
  * it is the surface the harness's own `dsh-client-file-upload` uses.
  */
-export const SUGGEST_ROUTE_PATH = '/api/suggest-prompt'
+export const SUGGEST_ROUTE_PATH = '/api/suggest-chips'
 
-/** Explicit, bounded generation for an existing idle session. */
-export const SUGGEST_GENERATE_ROUTE_PATH = '/api/suggest-prompt/generate'
-
-export type SuggestPromptGenerateStatus = 'generated' | 'empty' | 'busy' | 'no-context' | 'error'
-
-export interface SuggestPromptGenerateResponse {
-  readonly suggestion: import('./types.ts').SuggestPromptSuggestion | null
-  readonly status: SuggestPromptGenerateStatus
-}
-
-/**
- * HTTP method the suggestion route answers. The browser half calls this with a
- * plain `fetch` through the ordinary `/api` gateway, so the route declares
- * exactly the one method it serves.
- */
+/** HTTP method the suggestion route answers. */
 export const SUGGEST_ROUTE_METHOD = 'POST'
 
 /**

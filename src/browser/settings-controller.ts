@@ -1,5 +1,5 @@
 /**
- * The suggest-prompt settings card's staged form over the `suggest-prompt`
+ * The suggest-chips settings card's staged form over the `suggest-chips`
  * profile entry. Edits are staged until save; a save writes the staged route
  * pair back through the entry's config form (the host plugin re-resolves its
  * config from the entry, so the next completed turn uses the new model).
@@ -9,32 +9,30 @@
  * `providers` keys and the model list is the selected provider's `models[].id`.
  * A provider without an explicit model list falls back to a free-text model
  * field.
- * @module @studyzy/dsh-suggest-prompt/settings-controller
+ * @module dsh-suggest-chips/settings-controller
  */
 
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 
 /**
- * Settings namespace of the suggest-prompt host plugin. In `dsh >= 0.2.0` a
+ * Settings namespace of the suggest-chips host plugin. In `dsh >= 0.2.0` a
  * plugin's settings namespace IS its profile entry id, so this is the id the
  * bundle patch mounts the host plugin under. Spelled here rather than imported:
  * a client package must not depend on a Host package, and the host plugin that
  * owns it spells the same value.
  */
-export const SUGGEST_PROMPT_NS = 'suggest-prompt'
+export const SUGGEST_PROMPT_NS = 'suggest-chips'
 
-/** The suggest-prompt section's editable fields (route pair plus the accept shortcut). */
-export type SuggestPromptEditField = 'provider' | 'model' | 'acceptKey'
+/** The suggestion section's editable fields (the route pair). */
+export type SuggestPromptEditField = 'provider' | 'model'
 
-/** Route fields the card edits — the suggest-prompt section's optional pair. */
+/** Route fields the card edits — the suggestion section's optional pair. */
 export interface SuggestPromptSettings {
   /** Provider the auxiliary call routes through; absent follows the session route. */
   provider?: string
   /** Full catalog model id; absent follows the session route. */
   model?: string
-  /** Composer shortcut that accepts a suggestion into the draft (default Tab). */
-  acceptKey?: string
 }
 
 /** The `llm-pi-ai` section, narrowed to the route dropdown catalog. */
@@ -89,8 +87,6 @@ export interface SuggestPromptCardState {
   provider: RouteFieldState
   /** The model field. */
   model: RouteFieldState
-  /** The accept-key shortcut field. */
-  acceptKey: RouteFieldState
   /** Provider names from the pi-ai catalog plus the built-in DeepSeek route. */
   providerOptions: RouteOption[]
   /** Model ids of the effective provider, plus the current value when absent. */
@@ -134,7 +130,7 @@ export class SuggestPromptCardController {
   private failed = false
 
   /**
-   * @param form - the config form of the `suggest-prompt` entry.
+   * @param form - the config form of the `suggest-chips` entry.
    * @param catalogForm - the read-only form for the `llm-pi-ai` provider catalog.
    * @param deepSeekForm - the read-only form for the built-in DeepSeek adapter.
    */
@@ -202,7 +198,6 @@ export class SuggestPromptCardController {
       failed: this.failed,
       provider: this.field('provider', section.provider),
       model,
-      acceptKey: this.field('acceptKey', section.acceptKey),
       providerOptions,
       // Keep the current value selectable even when the catalog dropped it.
       modelOptions: catalogModels.length > 0 && model.text !== '' && !catalogModels.some(o => o.value === model.text)

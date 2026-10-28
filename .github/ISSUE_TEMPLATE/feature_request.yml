@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an enhancement to dsh-suggest-prompt
+description: Suggest an enhancement to dsh-suggest-chips
 labels: [enhancement]
 body:
   - type: markdown
@@ -19,7 +19,7 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior
-      description: What should happen instead? Include how it would affect the ghost-text UX, config surface, or bundle.
+      description: What should happen instead? Include how it would affect the chip UX, the config surface, or the bundle.
     validations:
       required: true
   - type: textarea

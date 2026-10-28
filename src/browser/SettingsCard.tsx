@@ -1,6 +1,6 @@
 /**
- * The suggest-prompt configuration card on the WebUI Plugins page: provider and
- * model for the ghost suggestion generation, chosen from the installed provider
+ * The suggest-chips configuration card on the WebUI Plugins page: provider and
+ * model for the suggestion generation, chosen from the installed provider
  * catalog and staged until save. The chrome replicates the harness's plugin
  * settings cards (PluginCard/ValueFields) so this card reads identically to the
  * built-in ones.
@@ -16,19 +16,17 @@
  * Only the detail pages are "open": the accordion this card used to be (an
  * `<li>` with a header button, because it lived in a tab panel's list) is gone,
  * and the entry point's summary is a separate, hook-free component.
- * @module @studyzy/dsh-suggest-prompt/settings-card
+ * @module dsh-suggest-chips/settings-card
  */
 
-import { useState } from 'react'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the LocaleNamespaceMap / SlotMap merges this card's props
 // depend on (the dictionary it renders, and the ctx.slots service merge).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-// Type-only: pulls the 'suggest-prompt.settings' LocaleNamespaceMap merge.
+// Type-only: pulls the 'suggest-chips.settings' LocaleNamespaceMap merge.
 import type {} from './settings-locales.ts'
 import type { SuggestPromptCardFace, SuggestPromptCardState, RouteOption, SuggestPromptEditField } from './settings-controller.ts'
 import type { SuggestPromptSettingsLocaleKey } from './settings-locales.ts'
-import { encodeKey } from './accept-key.ts'
 
 /**
  * The view the Plugins page asks one configuration entry for.
@@ -45,7 +43,7 @@ export interface PluginConfigViewProps {
   readonly view?: 'summary' | 'page' | undefined
 }
 
-/** Props the renderer binds for the suggest-prompt card. */
+/** Props the renderer binds for the suggest-chips card. */
 export type SettingsCardProps =
   PluginConfigViewProps
   // Both seats are root-scoped list/keyed slots with no owner props, so the
@@ -54,11 +52,11 @@ export type SettingsCardProps =
   // rather than via one of the two seats: `PropsRuntime` is invariant in its
   // key, so a type naming a single seat could not describe both.
   & PropsRuntime<'settings.plugins.tab'>
-  & PropsLocale<'suggest-prompt.settings'>
+  & PropsLocale<'suggest-chips.settings'>
   & InjectFace<SuggestPromptCardFace>
 
 /** Style tag id owning this card's copy of the plugin-card chrome. */
-const STYLE_TAG_ID = 'dsh-suggest-prompt-settings-style'
+const STYLE_TAG_ID = 'dsh-suggest-chips-settings-style'
 
 /** The plugin-card chrome, mirrored from the harness PluginCard/fields modules. */
 const CARD_CSS = `
@@ -259,80 +257,6 @@ function RouteField(props: {
 }
 
 /**
- * A shortcut recorder field: focusing it arms capture, and the next key press
- * (a main key with any held modifiers, e.g. `Alt`+`Slash`) commits the combo
- * as its canonical spec (`Alt+Slash`). Pressing only modifiers keeps the
- * recording live; blurring without a main key cancels back to the stored value.
- */
-function KeyRecorderField(props: {
-  t: (key: SuggestPromptSettingsLocaleKey) => string
-  id: string
-  label: string
-  hint: string
-  state: SuggestPromptCardState
-  onEdit: (text: string) => void
-  onReset: () => void
-}) {
-  const { t, id, label, hint, state, onEdit, onReset } = props
-  const value = state.acceptKey
-  const disabled = !state.writable
-  // '' while armed-and-idle defers to the stored value for display.
-  const [armed, setArmed] = useState(false)
-  const [pending, setPending] = useState('')
-  return (
-    <div className="dsh-sug-field">
-      <div className="dsh-sug-head">
-        <label className="dsh-sug-label" htmlFor={id}>{label}</label>
-        {value.overridden
-          ? (
-            <span className="dsh-sug-badges">
-              <span className="dsh-sug-badge">{t('overridden')}</span>
-              <button type="button" className="dsh-sug-reset" disabled={disabled} onClick={onReset}>
-                {t('reset')}
-              </button>
-            </span>
-          )
-          : null}
-      </div>
-      <input
-        id={id}
-        className="dsh-sug-input"
-        type="text"
-        value={armed ? pending : value.text}
-        readOnly
-        placeholder={armed ? t('pressKeys') : undefined}
-        disabled={disabled}
-        onFocus={() => { setPending(''); setArmed(true) }}
-        onBlur={() => { setArmed(false); setPending('') }}
-        onKeyDown={(event) => {
-          event.preventDefault()
-          const spec = encodeKey(event.code, { alt: event.altKey, ctrl: event.ctrlKey, meta: event.metaKey, shift: event.shiftKey })
-          if (spec === undefined) {
-            // A pure modifier key: show the held modifiers so far and keep recording.
-            setPending(modifierSpec(event.altKey, event.ctrlKey, event.metaKey, event.shiftKey))
-            return
-          }
-          onEdit(spec)
-          setArmed(false)
-          setPending('')
-        }}
-      />
-      <p className="dsh-sug-hint">{hint}</p>
-    </div>
-  )
-}
-
-/** The canonical modifier-prefix string (`Alt+Ctrl`, empty when none held). */
-function modifierSpec(alt: boolean, ctrl: boolean, meta: boolean, shift: boolean): string {
-  const parts: string[] = []
-  if (alt) parts.push('Alt')
-  if (ctrl) parts.push('Ctrl')
-  if (meta) parts.push('Meta')
-  if (shift) parts.push('Shift')
-  return parts.join('+')
-}
-
-/**
  * The card's one-line description, as `plugins.item` renders it in its summary
  * view — inside the card head's `<p>`, so this returns inline content only.
  *
@@ -351,7 +275,7 @@ export function SettingsCardSummary(props: { t: (key: SuggestPromptSettingsLocal
 }
 
 /**
- * Render the suggest-prompt configuration entry.
+ * Render the suggest-chips configuration entry.
  *
  * Branches on the view the Plugins page asked for, then delegates: the two
  * branches are separate components, so each has a constant hook count of its
@@ -387,7 +311,7 @@ function CardBody(props: SettingsCardProps & { t: (key: SuggestPromptSettingsLoc
           {!state.writable ? <p className="dsh-sug-readonly">{t('readOnly')}</p> : null}
           <RouteField
             t={t}
-            id="suggest-prompt-settings-provider"
+            id="suggest-chips-settings-provider"
             label={t('provider')}
             hint={t('providerHint')}
             state={state}
@@ -402,7 +326,7 @@ function CardBody(props: SettingsCardProps & { t: (key: SuggestPromptSettingsLoc
           />
           <RouteField
             t={t}
-            id="suggest-prompt-settings-model"
+            id="suggest-chips-settings-model"
             label={t('model')}
             hint={t('modelHint')}
             state={state}
@@ -414,15 +338,6 @@ function CardBody(props: SettingsCardProps & { t: (key: SuggestPromptSettingsLoc
               else props.edit('model', text)
             }}
             onReset={() => { props.resetField('model') }}
-          />
-          <KeyRecorderField
-            t={t}
-            id="suggest-prompt-settings-accept-key"
-            label={t('acceptKey')}
-            hint={t('acceptKeyHint')}
-            state={state}
-            onEdit={(text) => { props.edit('acceptKey', text) }}
-            onReset={() => { props.resetField('acceptKey') }}
           />
           <div className="dsh-sug-footer">
             {state.dirty ? <span className="dsh-sug-pending">{t('unsaved')}</span> : null}

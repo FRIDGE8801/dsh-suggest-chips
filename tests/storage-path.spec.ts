@@ -6,7 +6,7 @@
  * somewhere that is NOT the session log, and it must still reach the composer.
  * The store tests cover the read/write/ownership rules; the endpoint tests cover
  * the browser-visible half, including the malformed and unknown-endpoint paths
- * that decide whether a broken call degrades to "no ghost text" or breaks the
+ * that decide whether a broken call degrades to "no chips" or breaks the
  * composer.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -32,9 +32,7 @@ import type { FakeStorageDomain } from './storage.ts'
 const SUGGESTION = {
   turn: 1,
   baseSeq: 4,
-  text: 'run the focused suite',
-  truncated: false,
-  acceptKey: 'Tab',
+  suggestions: ['run the focused suite'],
 } as const
 
 const CONFIG = {
@@ -44,7 +42,7 @@ const CONFIG = {
   maxRecentTurns: 1,
   maxTranscriptChars: 12_000,
   maxSuggestionChars: 240,
-  acceptKey: 'Tab',
+  maxSuggestions: 3,
 }
 
 describe('the durable suggestion store', () => {
@@ -52,8 +50,8 @@ describe('the durable suggestion store', () => {
     // The spec IS the durable contract: a rename or version bump silently
     // orphans every stored suggestion, and dropping `invalidRecords` would turn
     // one unreadable record into a failed startup.
-    expect(SUGGEST_DOMAIN_NAME).toBe('suggest_prompt')
-    expect(suggestPromptDomainSpec.name).toBe('suggest_prompt')
+    expect(SUGGEST_DOMAIN_NAME).toBe('suggest_chips')
+    expect(suggestPromptDomainSpec.name).toBe('suggest_chips')
     expect(suggestPromptDomainSpec.version).toBe(1)
     expect(suggestPromptDomainSpec.invalidRecords).toBe('backup-and-skip')
     expect(Object.keys(suggestPromptDomainSpec.tables)).toEqual(['sessions'])
@@ -74,28 +72,36 @@ describe('the durable suggestion store', () => {
     const domain = createFakeDomain()
     await writeSuggestion(domain as never, SessionId('s1'), SUGGESTION)
     await writeSuggestion(domain as never, SessionId('s1'), {
-      ...SUGGESTION, turn: 2, text: 'second', truncated: true,
+      ...SUGGESTION, turn: 2, suggestions: ['second', 'and another'],
     })
     expect(domain.records.size).toBe(1)
-    expect(readSuggestion(domain as never, SessionId('s1'))).toMatchObject({ turn: 2, text: 'second', truncated: true })
+    expect(readSuggestion(domain as never, SessionId('s1'))).toMatchObject({
+      turn: 2, suggestions: ['second', 'and another'],
+    })
   })
 
   it('keeps one record per session', async () => {
     const domain = createFakeDomain()
     await writeSuggestion(domain as never, SessionId('a'), SUGGESTION)
-    await writeSuggestion(domain as never, SessionId('b'), { ...SUGGESTION, text: 'other' })
+    await writeSuggestion(domain as never, SessionId('b'), { ...SUGGESTION, suggestions: ['other'] })
     expect(domain.records.size).toBe(2)
-    expect(readSuggestion(domain as never, SessionId('a'))?.text).toBe('run the focused suite')
-    expect(readSuggestion(domain as never, SessionId('b'))?.text).toBe('other')
+    expect(readSuggestion(domain as never, SessionId('a'))?.suggestions).toEqual(['run the focused suite'])
+    expect(readSuggestion(domain as never, SessionId('b'))?.suggestions).toEqual(['other'])
   })
 
   it('refuses to serve a record written by another build', () => {
     // A record is owner-validated data: the harness leaves its shape to the
     // plugin, so a stale or hand-edited row must read as "no suggestion" rather
     // than reach the composer as a malformed value.
-    expect(toSuggestion({ version: 2, turn: 1, text: 'x', baseSeq: 0, truncated: false, acceptKey: 'Tab' })).toBeUndefined()
-    expect(toSuggestion({ version: 1, turn: 1, text: '', baseSeq: 0, truncated: false, acceptKey: 'Tab' })).toBeUndefined()
-    expect(toSuggestion({ version: 1, turn: 'nope', text: 'x', baseSeq: 0, truncated: false, acceptKey: 'Tab' })).toBeUndefined()
+    expect(toSuggestion({ version: 1, turn: 1, text: 'x', baseSeq: 0, truncated: false, acceptKey: 'Tab' })).toBeUndefined()
+    expect(toSuggestion({ version: 2, turn: 1, text: 'x', baseSeq: 0 })).toBeUndefined()
+    expect(toSuggestion({ version: 2, turn: 'nope', baseSeq: 0, suggestions: ['x'] })).toBeUndefined()
+    expect(toSuggestion({ version: 2, turn: 1, baseSeq: 0, suggestions: [] })).toBeUndefined()
+    expect(toSuggestion({ version: 2, turn: 1, baseSeq: 0, suggestions: [''] })).toBeUndefined()
+    expect(toSuggestion({
+      version: 2, turn: 1, baseSeq: 0,
+      suggestions: ['1', '2', '3', '4', '5', '6'],
+    })).toBeUndefined()
     expect(toSuggestion(null)).toBeUndefined()
     expect(toSuggestion('nonsense')).toBeUndefined()
   })
@@ -151,15 +157,15 @@ interface Mounted {
   readonly ctx: Context
   readonly domain: FakeStorageDomain
   readonly adapter: FixedAdapter
-  /** Invoke the registered RPC handler, exactly as the transport would. */
+  /** Invoke the registered route handler, exactly as the transport would. */
   call(sessionId: unknown): Promise<{ suggestion: unknown }>
 }
 
 let mounted: Mounted | undefined
 
 /**
- * Mount the plugin against an in-memory store, capturing the RPC registration so
- * the browser endpoint can be driven without a real transport.
+ * Mount the plugin against an in-memory store, capturing the route registration
+ * so the browser endpoint can be driven without a real transport.
  * @param reply - auxiliary model reply text.
  * @param seed - optional record to pre-populate the store with.
  */
@@ -173,9 +179,9 @@ async function mount(reply = 'run the focused suite', seed?: Record<string, unkn
   ctx.provide('connection', {
     fetch: {
       register(route: { path: string; methods: readonly string[]; fetch: typeof handler }) {
-        expect([SUGGEST_ROUTE_PATH, `${SUGGEST_ROUTE_PATH}/generate`]).toContain(route.path)
+        expect(route.path).toBe(SUGGEST_ROUTE_PATH)
         expect(route.methods).toEqual([SUGGEST_ROUTE_METHOD])
-        if (route.path === SUGGEST_ROUTE_PATH) handler = route.fetch
+        handler = route.fetch
         return () => undefined
       },
     },
@@ -191,7 +197,7 @@ async function mount(reply = 'run the focused suite', seed?: Record<string, unkn
   // appends anything. A bare `applyPlugin(ctx, config)` returns before that
   // scope resolves and the turn listener would not yet be wired.
   await ctx.plugin({
-    name: 'suggest-prompt',
+    name: 'suggest-chips',
     inject: PLUGIN_INJECT,
     apply: applyPlugin,
     Config: PluginConfig,
@@ -320,7 +326,7 @@ describe('the browser read endpoint', () => {
     const m = await mount('tip one')
     const { session } = completedTurn(m.ctx, 'stale')
     await flush()
-    expect((await m.call('stale')).suggestion).toMatchObject({ turn: 1, text: 'tip one' })
+    expect((await m.call('stale')).suggestion).toMatchObject({ turn: 1, suggestions: ['tip one'] })
 
     // Second turn completes with the model deliberately parked, so the test
     // observes the store at the exact moment the composer polls it.
@@ -336,7 +342,7 @@ describe('the browser read endpoint', () => {
     // And the new tip still arrives once generation completes.
     m.adapter.release()
     await flush()
-    expect((await m.call('stale')).suggestion).toMatchObject({ turn: 2, text: 'tip one' })
+    expect((await m.call('stale')).suggestion).toMatchObject({ turn: 2, suggestions: ['tip one'] })
   })
 
   it('serves the new suggestion once it is generated', async () => {
@@ -345,7 +351,7 @@ describe('the browser read endpoint', () => {
     await flush()
     anotherTurn(session, 2)
     await flush()
-    expect((await m.call('swap')).suggestion).toMatchObject({ turn: 2, text: 'tip one' })
+    expect((await m.call('swap')).suggestion).toMatchObject({ turn: 2, suggestions: ['tip one'] })
   })
 
   it('does not retire a record when the turn is already answered', async () => {
@@ -358,7 +364,7 @@ describe('the browser read endpoint', () => {
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     await flush()
     expect(m.domain.deletes).toBe(0)
-    expect((await m.call('dupe')).suggestion).toMatchObject({ turn: 1, text: 'only tip' })
+    expect((await m.call('dupe')).suggestion).toMatchObject({ turn: 1, suggestions: ['only tip'] })
   })
 
   it('publishes the suggestion it just generated', async () => {
@@ -367,7 +373,7 @@ describe('the browser read endpoint', () => {
     await flush()
     expect(m.adapter.requests).toHaveLength(1)
     const result = await m.call('live')
-    expect(result.suggestion).toMatchObject({ turn: 1, text: 'run the focused suite' })
+    expect(result.suggestion).toMatchObject({ turn: 1, suggestions: ['run the focused suite'] })
   })
 })
 
@@ -382,7 +388,7 @@ describe('generation writes to the store and never to the session log', () => {
     // The log-prohibition guarantee: ordinary traffic only, and no event of any
     // kind carries the suggestion.
     const types = session.snapshotEvents().map(event => (event as { type: string }).type)
-    expect(types.some(type => type.startsWith('suggest-prompt') || type.startsWith('plugin:suggest-prompt'))).toBe(false)
+    expect(types.some(type => type.startsWith('suggest-chips') || type.startsWith('plugin:suggest-chips'))).toBe(false)
   })
 
   it('skips a turn whose suggestion is already stored (reload dedupe)', async () => {

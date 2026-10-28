@@ -1,5 +1,5 @@
 /**
- * Host-only transcript fold for the suggest-prompt capability.
+ * Host-only transcript fold for the suggest-chips capability.
  *
  * `dsh >= 0.2.0` deprecates synchronous reads of arbitrary Session event
  * history (`Session.events`, `eventAt`, `snapshotEvents`, `ownEvents`) for new
@@ -15,7 +15,7 @@
  * reasoning, intermediate assistant steps, harness-injected context) is
  * dropped at fold time, which also keeps the retained state small on a long
  * session.
- * @module @studyzy/dsh-suggest-prompt/transcript
+ * @module dsh-suggest-chips/transcript
  */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'

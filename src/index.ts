@@ -1,10 +1,11 @@
 /**
- * suggest-prompt plugin: after every completed agent turn, generate one
- * suggested next prompt for the user through a bounded auxiliary LLM call and
- * deliver it to the web composer, which renders it as ghost placeholder text.
+ * suggest-chips plugin: after every completed agent turn, generate a small set
+ * of suggested next prompts for the user through a bounded auxiliary LLM call
+ * and deliver it to the web chat, which renders them as clickable chips under
+ * the newest turn.
  *
  * Delivery does NOT go through the session log. The pre-1.2 build appended
- * private `SessionEventMap` types (`suggest-prompt/…`), which are outside the
+ * private `SessionEventMap` types (`suggest-chips/…`), which are outside the
  * harness's closed `KNOWN_SESSION_EVENT_TYPES`; `0.2.0-rc.2` offers no way to
  * mark an appended event `ignorable`, so `validateStoredEvents` refused the
  * whole log on the next cold read and the session could not be reopened
@@ -16,7 +17,7 @@
  * The plugin is scoped to the projection registry, whose host-only transcript
  * fold supplies the bounded transcript: generation reads that fold rather than
  * scanning session history, which `dsh >= 0.2.0` deprecates for new callers.
- * @module @studyzy/dsh-suggest-prompt
+ * @module dsh-suggest-chips
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -41,8 +42,7 @@ import {
 import type { SuggestPromptDomain } from './records.ts'
 import type { SuggestPromptStorageRecord } from './domain.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from './transcript.ts'
-import { SUGGEST_GENERATE_ROUTE_PATH, SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from './rpc-contract.ts'
-import type { SuggestPromptGenerateStatus } from './rpc-contract.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from './rpc-contract.ts'
 import type { SuggestPromptSuggestion, SuggestPromptTranscriptState } from './types.ts'
 
 // The pure payload outlet (./types.ts, ONE home of the `suggestPrompt`
@@ -56,7 +56,7 @@ export type * from './domain.ts'
  * The browser-facing RPC channel this plugin owns. Absolute by contract
  * (`/^\/[A-Za-z0-9._~-]+$/`), and never the reserved `/api`.
  */
-export { SUGGEST_GENERATE_ROUTE_PATH, SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH }
+export { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH }
 
 interface SuggestPromptLifecycle {
   readonly running: boolean
@@ -107,17 +107,14 @@ export interface Config {
   readonly maxRecentTurns?: number
   /** Transcript tail character budget before JSON framing. */
   readonly maxTranscriptChars: number
-  /** Visible-character cap for the generated suggestion. */
+  /** Visible-character cap for each generated suggestion. */
   readonly maxSuggestionChars: number
+  /** Maximum number of suggestions returned per turn (default 3). */
+  readonly maxSuggestions?: number
   /** Optional explicit provider route; missing falls back to the session route. */
   readonly provider?: string
   /** Optional explicit model id; missing falls back to the session route. */
   readonly model?: string
-  /**
-   * Composer shortcut that accepts a displayed suggestion into the draft
-   * (for example `Tab`, `Alt+Slash`, or `Ctrl+Enter`). Default `Tab`.
-   */
-  readonly acceptKey?: string
 }
 
 /**
@@ -127,7 +124,7 @@ export interface Config {
  * appears there only when it is marked `volatile()`. That marking is what makes
  * the entry describable at all: with no volatile field the host omits the entry
  * from `settings.describe`, so the WebUI card would mount and then render
- * nothing. Only the three user-editable preferences are volatile — the
+ * nothing. Only the two user-editable route preferences are volatile — the
  * deployment bounds stay ordinary configuration, so the generated form does not
  * invite edits to them.
  *
@@ -146,9 +143,9 @@ const ConfigSchema = z.object({
   maxRecentTurns: z.number().step(1).min(1).default(1),
   maxTranscriptChars: z.number().step(1).min(1).required(),
   maxSuggestionChars: z.number().step(1).min(1).required(),
+  maxSuggestions: z.number().step(1).min(1).max(5).default(3),
   provider: z.string().volatile(),
   model: z.string().volatile(),
-  acceptKey: z.string().default('Tab').volatile(),
 })
 
 /**
@@ -158,7 +155,7 @@ const ConfigSchema = z.object({
 export const Config = ConfigSchema as unknown as z<Config>
 
 /** Cordis plugin identity. */
-export const name = 'suggest-prompt'
+export const name = 'suggest-chips'
 /**
  * Services required before this plugin activates. `storageDomain` is the
  * durable suggestion store (`@deepseek-ai/dsh-base` mounts it, so it is present
@@ -181,7 +178,7 @@ export const inject = ['llm', 'sessions', 'storageDomain', 'connection']
  * separately registered namespace. It is what the WebUI settings card binds to
  * and what `configEditor` writes through.
  */
-export const SUGGEST_PROMPT_NS = 'suggest-prompt'
+export const SUGGEST_PROMPT_NS = 'suggest-chips'
 
 /** Payload of the browser `get` call. */
 interface GetPayload {
@@ -303,8 +300,8 @@ function applyWithProjections(ctx: Context, config: Config): void {
      * Retire the previous turn's suggestion before generating this one.
      *
      * Without this the browser serves the *superseded* suggestion for the whole
-     * duration of the new generation: the composer stops hiding ghost text the
-     * moment the turn ends, the poll then reads a store that still holds the
+     * duration of the new generation: the chip row for the new turn mounts as
+     * soon as the turn ends, the poll then reads a store that still holds the
      * older turn's text, and only the write at the end of this function
      * displaces it. The user sees the old prompt flash and then swap — the
      * stale window is exactly the model's latency, which is why it reads as
@@ -336,7 +333,7 @@ function applyWithProjections(ctx: Context, config: Config): void {
         // failure is worth reporting, and only once per turn.
         if (state.pending?.controller !== controller) return
         const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.warn(`suggest-prompt: could not retire the previous suggestion: ${message}`)
+        ctx.logger.warn(`suggest-chips: could not retire the previous suggestion: ${message}`)
       }
     }
 
@@ -408,7 +405,7 @@ function applyWithProjections(ctx: Context, config: Config): void {
       // arm is defensive only.
       /* v8 ignore next 2 -- non-Error rejections are wrapped by the LLM layer */
       const message = error instanceof Error ? error.message : String(error)
-      ctx.logger.warn(`suggest-prompt: suggestion generation failed: ${message}`)
+      ctx.logger.warn(`suggest-chips: suggestion generation failed: ${message}`)
     }
 
     // session/event is dispatched synchronously inside the committing append;
@@ -473,69 +470,8 @@ function applyWithProjections(ctx: Context, config: Config): void {
         return Response.json({ suggestion })
       },
     }),
-    'suggest-prompt: browser suggestion route',
+    'suggest-chips: browser suggestion route',
   )
-
-  // Explicit generation shares the automatic path's flight slot, transcript,
-  // bounded dispatcher and durable domain; it deliberately bypasses its cursor.
-  ctx.effect(() => ctx.connection.fetch.register({
-    path: SUGGEST_GENERATE_ROUTE_PATH,
-    methods: ['POST'],
-    requestBody: 'buffered',
-    fetch: async (request: Request): Promise<Response> => {
-      const reply = (status: SuggestPromptGenerateStatus, code = 200, suggestion: SuggestPromptSuggestion | null = null): Response =>
-        Response.json({ suggestion, status }, { status: code })
-      let body: unknown
-      try { body = await request.json() } catch { return reply('error', 400) }
-      const id = sessionIdOf(body)
-      if (id === undefined || id.trim() !== id || id.length > 512 || /[\u0000-\u001f]/u.test(id)) return reply('error', 400)
-      const session = ctx.sessions.get(id)
-      if (session === undefined) return reply('error', 404)
-      const state = stateOf(session)
-      const lifecycle = ctx.sessionProjections.stateOf(session, 'suggestPromptLifecycle')
-      if (disposed || state.pending !== undefined || lifecycle?.running) return reply('busy', 409)
-      const transcript = transcriptStateOf(session)
-      const turn = transcript.lastCompletedTurn
-      if (!lifecycle?.completed || lifecycle.turn !== turn || turn < 1
-        || !transcript.entries.some(entry => entry.turn === turn && entry.text.trim().length > 0)) return reply('no-context')
-      const controller = new AbortController()
-      state.pending = { turn, controller }
-      const ownsFlight = (): boolean => !disposed && !controller.signal.aborted && state.pending?.controller === controller
-      try {
-        const resolved = resolveSuggestPromptConfig(config)
-        const opened = await domain()
-        if (!ownsFlight()) return reply('busy', 409)
-        // Unlike automatic generation, this turn may already be answered: a
-        // transient model failure must not trade a stored tip for nothing, so
-        // retire only when nothing answers the turn the user is asking about.
-        if (state.lastSuggestedTurn < turn) {
-          await mutate(state, async () => {
-            if (state.pending?.controller === controller) await clearSuggestion(opened, session.id)
-          })
-          if (!ownsFlight()) return reply('busy', 409)
-        }
-        const result = await generateSuggestion(ctx, resolved, session, turn, transcript, controller.signal)
-        if (!ownsFlight()) return reply('busy', 409)
-        if (result === undefined) {
-          state.lastSuggestedTurn = Math.max(state.lastSuggestedTurn, turn)
-          return reply('empty')
-        }
-        await mutate(state, async () => {
-          if (!ownsFlight()) return
-          await writeSuggestion(opened, session.id, result)
-          if (!ownsFlight()) await clearSuggestion(opened, session.id)
-        })
-        if (!ownsFlight()) return reply('busy', 409)
-        state.lastSuggestedTurn = Math.max(state.lastSuggestedTurn, turn)
-        return reply('generated', 200, readSuggestion(opened, session.id) ?? null)
-      } catch {
-        // No adapter error, credential, route or transcript is exposed to clients.
-        return ownsFlight() ? reply('error', 502) : reply('busy', 409)
-      } finally {
-        if (state.pending?.controller === controller) state.pending = undefined
-      }
-    },
-  }), 'suggest-prompt: manual generation route')
 
   // A separate host-only lifecycle fold handles restored sessions too, without
   // reading deprecated history or depending on private execution internals.

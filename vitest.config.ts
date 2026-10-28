@@ -9,15 +9,14 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   resolve: {
     alias: {
-      '@studyzy/dsh-suggest-prompt/client': fileURLToPath(new URL('src/browser/index.ts', import.meta.url)),
-      '@studyzy/dsh-suggest-prompt/types': fileURLToPath(new URL('src/types.ts', import.meta.url)),
-      '@studyzy/dsh-suggest-prompt/invariant': fileURLToPath(new URL('src/invariant.ts', import.meta.url)),
-      '@studyzy/dsh-suggest-prompt': fileURLToPath(new URL('src/index.ts', import.meta.url)),
+      'dsh-suggest-chips/client': fileURLToPath(new URL('src/browser/index.ts', import.meta.url)),
+      'dsh-suggest-chips/types': fileURLToPath(new URL('src/types.ts', import.meta.url)),
+      'dsh-suggest-chips/invariant': fileURLToPath(new URL('src/invariant.ts', import.meta.url)),
+      'dsh-suggest-chips': fileURLToPath(new URL('src/index.ts', import.meta.url)),
     },
   },
   test: {
     include: ['tests/**/*.spec.ts', 'tests/**/*.spec.tsx'],
-    exclude: ['**/provider.e2e.ts', '**/tests/e2e/**'],
     // The published dsh-client-* packages ship CSS modules (e.g. primitives'
     // StateDot.module.css); jsdom cannot import them as raw Node files. Inline
     // the published client dependencies so Vitest's pipeline (CSS modules as

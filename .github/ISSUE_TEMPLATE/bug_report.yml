@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a problem with dsh-suggest-prompt
+description: Report a problem with dsh-suggest-chips
 labels: [bug]
 body:
   - type: markdown
@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Plugin version
-      description: Version or git commit of dsh-suggest-prompt you're running.
+      description: Version or git commit of dsh-suggest-chips you're running.
     validations:
       required: true
   - type: input
@@ -36,7 +36,7 @@ body:
     id: what-happened
     attributes:
       label: What happened?
-      description: Describe the bug. Paste the ghost-text behavior or the absence of it, and any relevant dsh log lines mentioning `suggest-prompt`.
+      description: Describe the bug. Include what the chip row did (or failed to do) under the newest turn, and any relevant dsh log lines mentioning `suggest-chips`.
       placeholder: "Steps to reproduce:\n1. ...\n2. ...\nExpected: ...\nActual: ..."
     validations:
       required: true

@@ -4,7 +4,7 @@
 # built against, and the harness changes its contracts between releases. A bump
 # there is therefore a CODE change, not a routine chore: the adaptation steps are
 # documented in AGENTS.md ("Version-critical contracts"), and the affected
-# `pnpm.overrides` pin, docs, tests, and e2e assertions must move together.
+# `pnpm.overrides` pin, docs, and contract tests must move together.
 #
 # Dependabot is deliberately NOT pointed at the harness packages. They are pinned
 # exactly (see `.npmrc` / package.json) and upgraded by hand as a deliberate
@@ -26,7 +26,7 @@ updates:
         patterns:
           - '*'
 
-  # Tooling dependencies (typescript, vitest, tsdown, playwright, test libs).
+  # Tooling dependencies (typescript, vitest, tsdown, test libs).
   # These are independent of the harness contracts, so they are safe to batch.
   - package-ecosystem: npm
     directory: /

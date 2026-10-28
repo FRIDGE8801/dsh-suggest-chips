@@ -10,8 +10,8 @@ import LlmRuntime, { createAssistantMessage, createUserMessage, LlmAdapter } fro
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
-import { Config } from '@studyzy/dsh-suggest-prompt'
+import * as suggestChipsPlugin from 'dsh-suggest-chips'
+import { Config } from 'dsh-suggest-chips'
 import { createFakeDomain, installFakeStorage } from './storage.ts'
 import type { FakeStorageDomain } from './storage.ts'
 
@@ -31,18 +31,18 @@ function volatileFieldPaths(schema: { meta?: { volatile?: boolean }; type?: stri
     .map(path => (path === '<node>' ? key : `${key}.${path}`)))
 }
 
-describe('suggest-prompt settings schema', () => {
+describe('suggest-chips settings schema', () => {
   it('marks the user-editable preferences volatile so the host describes the entry', () => {
     // Without this, the settings card is unreachable: the host omits an entry
     // with no volatile field from the describe answer the client reads.
-    expect(volatileFieldPaths(Config as never).sort()).toEqual(['acceptKey', 'model', 'provider'])
+    expect(volatileFieldPaths(Config as never).sort()).toEqual(['model', 'provider'])
   })
 
   it('keeps the deployment bounds out of the generated settings form', () => {
     // The numeric bounds are composition policy, not user preferences; they must
     // not become editable form fields.
     const paths = volatileFieldPaths(Config as never)
-    for (const bound of ['maxInputBytes', 'maxOutputTokens', 'timeoutMs', 'maxRecentTurns', 'maxTranscriptChars', 'maxSuggestionChars']) {
+    for (const bound of ['maxInputBytes', 'maxOutputTokens', 'timeoutMs', 'maxRecentTurns', 'maxTranscriptChars', 'maxSuggestionChars', 'maxSuggestions']) {
       expect(paths).not.toContain(bound)
     }
   })
@@ -83,7 +83,7 @@ async function loadComposition(): Promise<Context> {
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-session'",
     "- name: '@deepseek-ai/dsh-session-projection'",
-    "- name: '@studyzy/dsh-suggest-prompt'",
+    "- name: 'dsh-suggest-chips'",
     '  config:',
     '    maxInputBytes: 1000',
     '    maxOutputTokens: 32',
@@ -108,7 +108,7 @@ async function loadComposition(): Promise<Context> {
     ['@deepseek-ai/dsh-llm', LlmRuntime],
     ['@deepseek-ai/dsh-session', SessionStore],
     ['@deepseek-ai/dsh-session-projection', SessionProjectionRegistry],
-    ['@studyzy/dsh-suggest-prompt', suggestPromptPlugin],
+    ['dsh-suggest-chips', suggestChipsPlugin],
   ])
   context.loader.internal = {
     version: 'v2',
@@ -125,7 +125,7 @@ async function loadComposition(): Promise<Context> {
   return context
 }
 
-describe('suggest-prompt Loader composition', () => {
+describe('suggest-chips Loader composition', () => {
   it('loads the plugin with required deployment policy and generates on a completed turn', async () => {
     const ctx = await loadComposition()
     const unloaded = [...ctx.loader.entries()]
@@ -160,15 +160,13 @@ describe('suggest-prompt Loader composition', () => {
     // history reads in production code). The suggestion must NOT appear there:
     // durability went to the plugin's own storage domain.
     const logged = session.snapshotEvents().map(event => event.type as string)
-    expect(logged.filter(type => type.startsWith('suggest-prompt') || type.startsWith('plugin:'))).toEqual([])
+    expect(logged.filter(type => type.startsWith('suggest-chips') || type.startsWith('plugin:'))).toEqual([])
 
     expect(domain?.puts).toBe(1)
     expect(domain?.records.get('loader-suggest')).toMatchObject({
-      version: 1,
+      version: 2,
       turn: 1,
-      text: 'Loader composed suggestion',
-      truncated: false,
-      acceptKey: 'Tab',
+      suggestions: ['Loader composed suggestion'],
     })
   })
 })
