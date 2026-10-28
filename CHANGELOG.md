@@ -10,42 +10,7 @@ version it targets.
 
 ## [Unreleased]
 
-### Added
-
-- **Touch acceptance and on-demand generation in the composer toolbar.** A
-  localized, accessible button in the `conversation.input.right` slot either
-  adopts the stored suggestion into the draft (never submitting it) or asks the
-  host for a fresh one through `POST /api/suggest-prompt/generate`. The route
-  reuses the automatic path's bounded, redacted dispatcher and plugin-owned
-  storage, and answers `generated` / `empty` / `busy` / `no-context` / `error`;
-  provider and adapter failures are never surfaced to the browser. Manual and
-  automatic generation share one per-session in-flight slot, durable mutations
-  are serialized so an older asynchronous put cannot win last, and a
-  `suggestPromptLifecycle` projection supplies idle/completed context without
-  reading deprecated session history. Nothing is written to the session log.
-
-### Fixed
-
-- **The harness runtime packages are declared as peers, and a test keeps them
-  that way.** 1.2.3 stopped installing `@deepseek-ai/dsh-client-connection` and
-  `@deepseek-ai/dsh-storage-domain` alongside the plugin but did not declare them
-  in `peerDependencies` as the other fifteen harness packages are.
-  `tests/package-manifest.spec.ts` now enforces both halves: no
-  `@deepseek-ai/dsh*` entry in `dependencies`, and a version *range* (never an
-  exact pin) for each harness package the plugin imports while the host runs it.
-- **A failed on-demand generation no longer discards a working suggestion.** The
-  explicit route retired the stored record the way automatic generation does,
-  so a transient model timeout or 429 answered `502` *and* destroyed a tip that
-  still answered the turn the user was asking about. It now retires only when
-  nothing answers that turn.
-- **A `running` toggle no longer cancels an in-flight on-demand request.** The
-  toolbar control's reset effect was keyed on `running` as well as the session,
-  so a turn starting and finishing mid-request orphaned the fetch, left the
-  button stuck disabled, let a second click issue a duplicate call, and revoked
-  an acceptance already shown in the composer. Only a session switch resets it
-  now.
-
-## [1.2.3] - 2026-10-19
+## [1.2.3] - 2026-10-28
 
 ### Fixed
 
@@ -61,6 +26,40 @@ version it targets.
   install, exactly as 1.1.0 already relied on for `dsh-llm`/`dsh-session`), so
   they belong in `peerDependencies`/`devDependencies` only. The entries stay in
   `devDependencies` for local builds; they no longer ship.
+
+- **The harness runtime packages are declared as peers, and a test keeps them
+  that way.** Dropping `@deepseek-ai/dsh-client-connection` and
+  `@deepseek-ai/dsh-storage-domain` from `dependencies` left them undeclared:
+  they were missing from `peerDependencies`, where the other fifteen harness
+  packages are.
+  `tests/package-manifest.spec.ts` now enforces both halves: no
+  `@deepseek-ai/dsh*` entry in `dependencies`, and a version *range* (never an
+  exact pin) for each harness package the plugin imports while the host runs it.
+- **A failed on-demand generation no longer discards a working suggestion.** The
+  explicit route retired the stored record the way automatic generation does,
+  so a transient model timeout or 429 answered `502` *and* destroyed a tip that
+  still answered the turn the user was asking about. It now retires only when
+  nothing answers that turn.
+- **A `running` toggle no longer cancels an in-flight on-demand request.** The
+  toolbar control's reset effect was keyed on `running` as well as the session,
+  so a turn starting and finishing mid-request orphaned the fetch, left the
+  button stuck disabled, let a second click issue a duplicate call, and revoked
+  an acceptance already shown in the composer. Only a session switch resets it
+  now.
+
+### Added
+
+- **Touch acceptance and on-demand generation in the composer toolbar.** A
+  localized, accessible button in the `conversation.input.right` slot either
+  adopts the stored suggestion into the draft (never submitting it) or asks the
+  host for a fresh one through `POST /api/suggest-prompt/generate`. The route
+  reuses the automatic path's bounded, redacted dispatcher and plugin-owned
+  storage, and answers `generated` / `empty` / `busy` / `no-context` / `error`;
+  provider and adapter failures are never surfaced to the browser. Manual and
+  automatic generation share one per-session in-flight slot, durable mutations
+  are serialized so an older asynchronous put cannot win last, and a
+  `suggestPromptLifecycle` projection supplies idle/completed context without
+  reading deprecated session history. Nothing is written to the session log.
 
 ## [1.2.0] - 2026-10-12
 
