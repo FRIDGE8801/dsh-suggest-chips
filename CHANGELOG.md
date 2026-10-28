@@ -14,6 +14,13 @@ version it targets.
 
 ## [Unreleased]
 
+### Changed
+
+- Chips stay visible while the composer has text and are retired only after the
+  message is sent (the submission phase leaves `plain`). Starting a reply no
+  longer discards the tips, so the user can change their mind and still click
+  one.
+
 ## [0.1.0] - 2026-10-28
 
 Targets `dsh 0.2.0-rc.2`.

@@ -11,10 +11,11 @@
  * the store: every completed turn has a tail, and mounting the poll in each
  * would put one loopback poller per history row on the session.
  *
- * Chips are shown while the agent is idle, the draft is empty, and no chip is
- * already being sent. A send hides them until the next turn starts; the host
- * retires the previous record as soon as that turn completes, so a stale tip is
- * never offered for the new turn.
+ * Chips are shown while the agent is idle and no submission is in flight. The
+ * draft is deliberately not a condition: typing must not hide the tips, so the
+ * user can start a reply, change their mind, and still click one. Sending the
+ * draft hides them until the next turn; the host retires the previous record as
+ * soon as that turn completes, so a stale tip is never offered for the new turn.
  */
 import { useEffect, useState } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -102,22 +103,24 @@ const EMPTY: readonly string[] = []
 
 /**
  * The suggestions to surface, or an empty list when none should show.
+ *
+ * The draft is intentionally absent: a non-empty composer must not hide the
+ * chips, otherwise starting to type would permanently discard the tips before
+ * the user decides to send. Only actually sending (a non-plain submit phase, a
+ * running agent, or a newer turn) retires them.
  * @param suggestion - the stored suggestion set owned by this turn, or `null`.
  * @param running - whether the session agent is mid-turn.
- * @param draft - the current composer draft.
  * @param phase - the composer's submission phase.
  * @returns the chip texts to render.
  */
-function visibleSuggestions(
+export function visibleSuggestions(
   suggestion: SuggestPromptSuggestion | null,
   running: boolean,
-  draft: string,
   phase: string | undefined,
 ): readonly string[] {
   if (running) return EMPTY
   if (suggestion === null) return EMPTY
   if (phase !== undefined && phase !== 'plain') return EMPTY
-  if (draft.trim() !== '') return EMPTY
   return suggestion.suggestions
 }
 
@@ -157,7 +160,6 @@ function TurnSuggestions({ turn, useSession, useInput, inputActions, sessionId }
   // prompts that answer a different turn.
   const suggestion = stored !== null && stored.turn === turn ? stored : null
   const running = useSession(state => state.running)
-  const draft = useInput(state => state.draft)
   const phase = useInput(state => state.phase)
   const [sending, setSending] = useState<string | null>(null)
 
@@ -185,7 +187,7 @@ function TurnSuggestions({ turn, useSession, useInput, inputActions, sessionId }
   }, [])
 
   const visible = sending === null
-    ? visibleSuggestions(suggestion, running, draft, phase)
+    ? visibleSuggestions(suggestion, running, phase)
     : EMPTY
   if (visible.length === 0) return null
 

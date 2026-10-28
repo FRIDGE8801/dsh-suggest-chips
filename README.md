@@ -9,6 +9,7 @@ After every completed agent turn, a bounded auxiliary LLM call predicts 2–3 pr
 ## Features
 
 - **One click to continue** — a chip fills the composer draft and submits it, exactly like typing the prompt yourself.
+- **Not while you type, only when you send** — starting a reply leaves the chips visible, so you can change your mind and still click one; they disappear once your message is actually sent.
 - **2–3 suggestions per turn** — the model returns a short ranked list (`maxSuggestions` defaults to `3`), best first.
 - **In-transcript placement** — chips sit under the newest completed turn and scroll with the chat; they do not float over the composer.
 - **Last turn only** — by default only the last completed turn's user message and assistant final answer are sent to the suggestion model (`maxRecentTurns: 1`); tool calls and reasoning are never included.
@@ -84,7 +85,7 @@ The bundle's `cordis.patch.yml` provides these defaults; override the same entry
 - Generation is bounded and pure: it reads a host-only transcript fold (last completed turn), redacts secrets, frames the request, disables thinking, enforces the deadline, then sanitizes and filters the reply.
 - Suggestions are persisted in the plugin's **own storage domain** (`suggest_chips`) and served to the browser over `POST /api/suggest-chips` with `{ sessionId }`. **Nothing is written to the session log**, so a cold read can never fail on a plugin-private event type.
 - The browser polls that route (700 ms) from the newest turn's tail entry only, so a long transcript still runs exactly one poller.
-- Chips are visible only when all of the following hold: the turn is the newest completed one, the agent is idle, and the composer draft is empty. Typing hides them; clearing the draft brings them back without a new model call.
+- Chips are visible only when all of the following hold: the turn is the newest completed one, the agent is idle, and the composer is not mid-submit. A non-empty draft does **not** hide them — you can start typing, change your mind, and still click a chip. They disappear when your message is sent.
 - Clicking a chip sets the composer draft and submits it. Chips are plain buttons — no shortcut interception, no hidden state.
 - The reply language follows the conversation: a CJK last user message yields Chinese suggestions, everything else English.
 
@@ -102,7 +103,7 @@ The bundle's `cordis.patch.yml` provides these defaults; override the same entry
 - An empty or filtered model reply means no chips for that turn; reopening the session will not retry.
 - Chips appear only under the newest turn. Older turns keep no visible chips even if a suggestion was stored for them.
 - The stored suggestion is model output: it can be plausible but wrong, and it is always shown as a suggestion, never auto-sent.
-- Chips are hidden while you have a draft; clear the composer to see them again.
+- Chips stay visible while you type; sending the draft is what retires them.
 
 ## Development
 
