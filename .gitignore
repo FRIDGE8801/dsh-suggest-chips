@@ -6,3 +6,8 @@ lib/
 test-results/
 playwright-report/
 .artifacts/
+# Local pnpm content store, used when `pnpm install` must run without a
+# writable global store (sandboxed/offline machines). Never committed.
+.pnpm-store/
+# `pnpm pack` / `npm pack` output.
+*.tgz
