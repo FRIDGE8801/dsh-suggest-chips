@@ -1,5 +1,5 @@
 /**
- * Package-owned durable suggest-prompt invariant.
+ * Package-owned durable suggest-chips invariant.
  *
  * The plugin holds a session-log prohibition, and that prohibition is what this
  * companion now asserts: a suggestion never reaches the log. The pre-1.2 build
@@ -8,25 +8,25 @@
  * `ignorable`, so `validateStoredEvents` refused the whole log on the next cold
  * read and the session could not be reopened (issue #4). The suggestion is
  * persisted in this plugin's own storage domain instead (see ./records.ts), so
- * any `suggest-prompt`-shaped event appearing in a log is a regression, not
+ * any `suggest-chips`-shaped event appearing in a log is a regression, not
  * merely malformed data.
- * @module @studyzy/dsh-suggest-prompt/invariant
+ * @module dsh-suggest-chips/invariant
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = '@studyzy/dsh-suggest-prompt'
+const PACKAGE_NAME = 'dsh-suggest-chips'
 
 /**
  * The event-type prefixes this package must never write. Historical builds used
  * these; a current build writing one would break every reader sooner or later.
  */
-const FORBIDDEN_PREFIXES = ['suggest-prompt/', 'plugin:suggest-prompt/'] as const
+const FORBIDDEN_PREFIXES = ['suggest-chips/', 'plugin:suggest-chips/'] as const
 
 /** Cordis companion plugin name. */
-export const name = 'suggest-prompt-invariant'
+export const name = 'suggest-chips-invariant'
 /** Service required before the companion can reserve package ownership. */
 export const inject = ['invariants']
 
@@ -44,7 +44,7 @@ export function validateEvent(event: SessionEvent, fail: InvariantFailure): void
   for (const prefix of FORBIDDEN_PREFIXES) {
     if (!type.startsWith(prefix)) continue
     fail(
-      `suggest-prompt must not write session-log events (saw "${type}");`
+      `suggest-chips must not write session-log events (saw "${type}");`
       + ' suggestions are persisted in the plugin storage domain',
     )
     return
@@ -68,7 +68,7 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
 }, { inject: ['sessions'] })
 
 /**
- * Register the suggest-prompt invariant companion.
+ * Register the suggest-chips invariant companion.
  * @param ctx - Cordis context carrying the invariant service.
  * @returns the installed registration's disposer after setup succeeds.
  */

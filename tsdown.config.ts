@@ -25,7 +25,7 @@ const HOST_EXTERNALS: readonly string[] = [
   'zod',
 ]
 
-const CLIENT_ID = '@studyzy/dsh-suggest-prompt/client'
+const CLIENT_ID = 'dsh-suggest-chips/client'
 /**
  * Client-bundle externals. In `dsh >= 0.2.0` a fetch bundle may only require the
  * shell's platform-singleton seed words; requiring anything else misses the
@@ -52,7 +52,7 @@ const CLIENT_EXTERNALS: readonly string[] = [
 ]
 
 const host: UserConfig = {
-  name: '@studyzy/dsh-suggest-prompt',
+  name: 'dsh-suggest-chips',
   entry: ['lib/types/{index,invariant}.js'],
   outDir: 'lib',
   format: 'esm',

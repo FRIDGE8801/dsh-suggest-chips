@@ -1,6 +1,6 @@
 /**
- * Locale copy for the suggest-prompt settings card.
- * @module @studyzy/dsh-client-ui-suggest-prompt/settings-locales
+ * Locale copy for the suggest-chips settings card.
+ * @module dsh-suggest-chips/settings-locales
  */
 
 /** Locale keys the settings card renders. */
@@ -11,9 +11,6 @@ export type SuggestPromptSettingsLocaleKey =
   | 'providerHint'
   | 'model'
   | 'modelHint'
-  | 'acceptKey'
-  | 'acceptKeyHint'
-  | 'pressKeys'
   | 'followRoute'
   | 'overridden'
   | 'reset'
@@ -26,21 +23,18 @@ export type SuggestPromptSettingsLocaleKey =
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    'suggest-prompt.settings': SuggestPromptSettingsLocaleKey
+    'suggest-chips.settings': SuggestPromptSettingsLocaleKey
   }
 }
 
 /** English copy for the card. */
 export const en: Record<SuggestPromptSettingsLocaleKey, string> = {
-  title: 'Suggested next prompt',
-  description: 'Model that generates the ghost suggestion after each turn',
+  title: 'Suggested prompts',
+  description: 'Model that generates the next-prompt chips after each turn',
   provider: 'Provider',
-  providerHint: 'Registered pi-ai provider; choose "follow session route" to use the session model.',
+  providerHint: 'Registered pi-ai provider; leave empty to follow the session route.',
   model: 'Model',
-  modelHint: 'A model of the selected provider; choose "follow session route" to use the session model.',
-  acceptKey: 'Accept shortcut',
-  acceptKeyHint: 'Press the key (or key combo) you want; focus the field first.',
-  pressKeys: 'Press keys…',
+  modelHint: 'A model of the selected provider; leave empty to follow the session route.',
   followRoute: 'Follow session route',
   overridden: 'overridden',
   reset: 'Reset',
@@ -55,14 +49,11 @@ export const en: Record<SuggestPromptSettingsLocaleKey, string> = {
 /** Simplified Chinese copy for the card. */
 export const zh: Record<SuggestPromptSettingsLocaleKey, string> = {
   title: '建议提示词',
-  description: '每轮结束后生成幽灵建议所使用的模型',
+  description: '每轮结束后生成建议提示词选项所使用的模型',
   provider: 'Provider',
-  providerHint: '已注册的 pi-ai provider；选择"跟随会话路由"则使用会话模型。',
+  providerHint: '已注册的 pi-ai provider；留空则跟随会话路由。',
   model: 'Model',
-  modelHint: '所选 provider 的模型；选择"跟随会话路由"则使用会话模型。',
-  acceptKey: '接受快捷键',
-  acceptKeyHint: '先点击该输入框获得焦点，然后按下你想用的按键（或组合键）。',
-  pressKeys: '请按键…',
+  modelHint: '所选 provider 的模型；留空则跟随会话路由。',
   followRoute: '跟随会话路由',
   overridden: '已覆盖',
   reset: '重置',

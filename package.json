@@ -1,14 +1,27 @@
 {
-  "name": "@studyzy/dsh-suggest-prompt",
-  "description": "为 DeepSeek Harness 开发的「建议提示词」插件：单个 bundle 集成了宿主生成插件与 Web 输入框幽灵文字界面。每个 agent 回合完成后，通过一次有界的辅助 LLM 调用生成一条建议的下一条提示词，存入插件自己的 storage domain，并经 /api 网关上的插件路由提供给浏览器；Web 端把它渲染为输入框内的幽灵占位文字，通过可配置的快捷键（默认 Tab）采纳进草稿。会话日志零写入。",
-  "version": "1.2.3",
+  "name": "dsh-suggest-chips",
+  "description": "DeepSeek Harness (dsh) plugin: after every agent turn, a bounded auxiliary LLM call suggests 2-3 next prompts, rendered as clickable chips under the newest turn; a click sends the prompt immediately.",
+  "version": "0.1.0",
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/studyzy/dsh-suggest-prompt.git"
+    "url": "git+https://github.com/FRIDGE8801/dsh-suggest-chips.git"
   },
+  "homepage": "https://github.com/FRIDGE8801/dsh-suggest-chips#readme",
+  "bugs": {
+    "url": "https://github.com/FRIDGE8801/dsh-suggest-chips/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "suggestions",
+    "prompts"
+  ],
   "type": "module",
   "packageManager": "pnpm@9.15.0",
   "engines": {
@@ -43,7 +56,8 @@
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat"
       ],
       "platform": "web"
     },
@@ -58,18 +72,18 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "verify:client": "node scripts/verify-client-bundle.mjs",
-    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm verify:client",
-    "test:e2e": "vitest run -c vitest.e2e.config.ts tests/e2e/suggest.e2e.ts",
-    "test:e2e:local": "vitest run -c vitest.e2e.config.ts tests/e2e/suggest-local.e2e.ts"
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm verify:client"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-locale": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-store": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-chat": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-primitives": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-invariants": "^0.2.0-rc.2",
@@ -91,11 +105,12 @@
     "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
     "@deepseek-ai/dsh-client-locale": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-store": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-client-test-runtime": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-conversation": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-dockkit": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.0-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
     "@deepseek-ai/dsh-invariants": "^0.2.0-rc.2",
@@ -105,16 +120,10 @@
     "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
     "@deepseek-ai/dsh-timeout": "^0.2.0-rc.2",
     "@deepseek-ai/dsh-util-values": "^0.2.0-rc.2",
-    "@playwright/test": "1.64.1",
-    "@testing-library/react": "^16.1.0",
     "@types/node": "^26.6.4",
     "@types/react": "~19.3.0",
-    "jsdom": "^30.1.2",
-    "lightningcss": "^1.32.0",
-    "playwright": "1.64.1",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "simple-icons": "16.35.0",
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3",

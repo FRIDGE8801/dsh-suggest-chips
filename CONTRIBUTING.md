@@ -1,12 +1,12 @@
 # Contributing
 
-Thanks for your interest in `dsh-suggest-prompt`. This document covers the
+Thanks for your interest in `dsh-suggest-chips`. This document covers the
 practical rules for changing the repo; the architecture itself lives in
 [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
 
-- Node `^22.19` or `>=24` (see `.nvmrc`)
+- Node `^22.19` or `>=24`
 - `pnpm` (the exact version is pinned by `packageManager` in `package.json`)
 
 ## Setup
@@ -16,27 +16,29 @@ pnpm install       # maps three unpublished @deepseek-ai packages to local stubs
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm verify:client
 ```
 
 `pnpm install` uses `pnpm.overrides` to map three upstream packages that are not
-on the npm registry to empty local packages under `stubs/`. That is expected,
-not a workaround you should remove.
+on the npm registry to empty local packages under `stubs/`, and pins the
+`@deepseek-ai/dsh-*` set to the targeted release. That is expected, not a
+workaround you should remove.
 
-## The three gates
+## The gates
 
-Every change must pass all three, and CI runs exactly these:
+Every change must pass all of them; `pnpm check` runs the whole set:
 
 ```sh
-pnpm typecheck     # tsc --noEmit
-pnpm test          # vitest run (unit + client, jsdom)
-pnpm build         # tsc -> lib/types, tsdown -> lib/{index,invariant,client}.js
+pnpm typecheck      # tsc --noEmit
+pnpm test           # vitest run (unit, jsdom)
+pnpm build          # tsc -> lib/types, tsdown -> lib/{index,invariant,client}.js
+pnpm verify:client  # execute the built client bundle against the browser contract
 ```
 
 Run a single test file while iterating:
 
 ```sh
 pnpm vitest run tests/sanitize.spec.ts
-pnpm vitest run tests/ghost.client.spec.tsx
 ```
 
 ## Version-coupled code (read before editing)
@@ -44,31 +46,40 @@ pnpm vitest run tests/ghost.client.spec.tsx
 This plugin is built against a **specific** `dsh` release, and the harness
 changes its internal contracts between releases. The seams that have already
 broken once are documented in [AGENTS.md](AGENTS.md) under
-"Version-critical contracts". Two of them are easy to get wrong:
+"Version-critical contracts". A few are easy to get wrong:
 
 - **The client module table is a fixed seed list.** A browser bundle may only
   `require` the platform singletons listed in the harness's `PLATFORM_MODULES`.
   Requiring anything else throws at load time. `CLIENT_EXTERNALS` in
   `tsdown.config.ts` mirrors that list.
-- **The composer is a Lexical `contenteditable` host, not a `<textarea>`**, and
-  its placeholder is a real sibling element rather than a `::placeholder`
-  pseudo-element. Code that assumes a textarea (focus checks, CSS selectors)
-  will silently do nothing.
+- **The chip seat is `conversation.chat.turnTail`**, a session-scoped slot
+  rendered per completed turn inside the transcript. Its entries are direct flex
+  children of the turn-tail root, and the slot passes the standard session kit
+  (`useChat`, `inputActions`, `sessionId`). Do not move chips back into a
+  composer overlay: they must scroll with the chat.
+- **Only the newest turn may poll the host.** `SuggestionChips` gates on
+  `useChat(snapshot => snapshot.timeline.turnOrder.at(-1))`; removing that gate
+  mounts one 700 ms poller per turn in a long transcript.
+- **Settings surfaces are the Plugins page seats** `plugins.item` (by `id`) and
+  `plugins.bundle.config` (keyed by the npm package name). Both must inject the
+  same controller face; a fresh face per registration silently splits staged
+  edits. Only `volatile()` fields appear in the form.
+- **Never write to the session log.** Suggestions are stored in the plugin's own
+  storage domain. Appending a plugin-private event type is what made sessions
+  unreadable on cold read (issue #4).
 
 When you adapt to a new harness release, update the affected `@deepseek-ai/*`
-ranges, the `pnpm.overrides` pin, `AGENTS.md`, and the e2e assertions together.
+ranges, the `pnpm.overrides` pin, `AGENTS.md`, and the contract tests together.
 
 ## Tests
 
-- Add a regression test for every bug fix. Two of this project's shipped bugs
-  (duplicate ghost text, and `Tab` not accepting) were invisible to a test suite
-  that only exercised the old `<textarea>` shape — so test the DOM shape the
-  current harness actually renders.
-- `tests/e2e/` drives a real `dsh web` with Playwright and requires
-  `DEEPSEEK_API_KEY`. It is excluded from `pnpm test`; run it with
-  `pnpm test:e2e`.
-- Manual and browser end-to-end suites are excluded from the default lane via
-  `vitest.config.ts`.
+- Add a regression test for every bug fix. UI contracts in this project are
+  checked by unit tests and by `verify:client`; a change that only “looks right”
+  in the browser but is untested is likely to regress silently.
+- `scripts/verify-client-bundle.mjs` executes the real `lib/client.js` through a
+  stand-in module loader and asserts the registrations the Plugins page and the
+  chat renderer require. Run it after touching the client bundle or `package.json`.
+- There is no e2e lane: tests never spawn a real `dsh` or call a live model.
 
 ## Commits and pull requests
 
@@ -76,9 +87,9 @@ ranges, the `pnpm.overrides` pin, `AGENTS.md`, and the e2e assertions together.
   `refactor:`) keep the history scannable.
 - Keep a commit focused; unrelated cleanups belong in their own PR.
 - Fill in the pull request template, including the **Breaking changes** section
-  when you touch the bundle's public surface, the `suggest-prompt` config
-  schema, or the `suggestPrompt` session projection.
-- Note in the PR how you verified the change. "Ran `pnpm test`" is enough for a
+  when you touch the bundle's public surface, the `suggest-chips` config schema,
+  or the browser route contract.
+- Note in the PR how you verified the change. "Ran `pnpm check`" is enough for a
   small fix; contract changes should say what you checked against the harness
   source.
 

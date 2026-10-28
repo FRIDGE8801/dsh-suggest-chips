@@ -1,10 +1,10 @@
 /**
  * Transcript redaction, suggestion sanitization, and semantic output
- * filtering for the suggest-prompt auxiliary call: nothing that reaches the
+ * filtering for the suggest-chips auxiliary call: nothing that reaches the
  * model carries secret-shaped text, and nothing the model returns can inject
  * terminal control into the web composer or read as meta-text instead of a
  * real next prompt. Pure functions, exported for direct unit coverage.
- * @module @studyzy/dsh-suggest-prompt/sanitize
+ * @module dsh-suggest-chips/sanitize
  */
 
 /** One secret-shaped pattern and its replacement label. */
@@ -101,6 +101,53 @@ export function sanitizeSuggestion(text: string, maxChars: number): { readonly t
     return { text: Array.from(value).slice(0, maxChars).join(''), truncated }
   }
   return { text: value, truncated }
+}
+
+/**
+ * Parse a model reply into the chip list: a JSON string array is preferred
+ * (fenced or not), with a line-per-candidate fallback. Every candidate is
+ * structurally cleaned, semantically filtered, truncated to the visible cap,
+ * de-duplicated case-insensitively, and the best `maxCount` are kept.
+ * @param raw - raw model output.
+ * @param maxChars - per-suggestion visible-character cap (code points).
+ * @param maxCount - hard cap on returned suggestions.
+ * @returns the sanitized suggestions, possibly empty.
+ */
+export function parseSuggestionList(raw: string, maxChars: number, maxCount: number): string[] {
+  const text = stripLoneSurrogates(raw
+    .replace(ESCAPE_SEQUENCE, '')
+    .replace(CONTROL_CHARS, ''))
+  let candidates: unknown[] = []
+  const start = text.indexOf('[')
+  const end = text.lastIndexOf(']')
+  if (start !== -1 && end > start) {
+    try {
+      const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+      if (Array.isArray(parsed)) candidates = parsed
+    } catch {
+      // Fall through to line parsing below.
+    }
+  }
+  if (candidates.length === 0) {
+    candidates = text.split('\n')
+      .map(line => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/u, '').trim())
+      .filter(line => line !== '')
+  }
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const cleaned = cleanSuggestion(candidate)
+    if (cleaned === '' || shouldFilterSuggestion(cleaned)) continue
+    const { text: value } = sanitizeSuggestion(cleaned, maxChars)
+    if (value === '') continue
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+    if (out.length >= Math.max(1, maxCount)) break
+  }
+  return out
 }
 
 /**

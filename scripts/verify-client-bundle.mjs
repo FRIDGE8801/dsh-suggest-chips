@@ -39,7 +39,7 @@
  * invariant is on what `inject()` RETURNS, never on the inject function itself.
  *
  * Usage: node scripts/verify-client-bundle.mjs
- * @module @studyzy/dsh-suggest-prompt/scripts/verify-client-bundle
+ * @module dsh-suggest-chips/scripts/verify-client-bundle
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -71,13 +71,13 @@ const packageName = pkg.name
  * Plugin id the bundle registers its factory under. Mirrors `CLIENT_ID` in
  * `tsdown.config.ts`; it is the `<package>/client` outlet, not the package name.
  */
-const CLIENT_ID = '@studyzy/dsh-suggest-prompt/client'
+const CLIENT_ID = 'dsh-suggest-chips/client'
 /** Locale namespace the card's dictionaries register under. */
-const NS = 'suggest-prompt.settings'
+const NS = 'suggest-chips.settings'
 /** Profile entry id of the host plugin, reused as this package's settings namespace. */
-const ENTRY_ID = 'suggest-prompt'
+const ENTRY_ID = 'suggest-chips'
 /** The keyed `plugins.bundle.config` slot is addressed by npm package name. */
-const BUNDLE_KEY = '@studyzy/dsh-suggest-prompt'
+const BUNDLE_KEY = 'dsh-suggest-chips'
 
 // --- Manifest: the declaration the host scans -----------------------------
 const decl = pkg.dsh?.client
@@ -88,13 +88,18 @@ check(
   decl?.inject === undefined || (Array.isArray(decl.inject) && decl.inject.every((v) => typeof v === 'string')),
   JSON.stringify(decl?.inject),
 )
-// The loader inject list is about LOAD ORDER, not type dependencies. The
-// type-only `dsh-client-*` packages must stay off it: a `link:`ed profile
-// dependency cannot resolve them (they live in the app's node_modules), and
-// listing one buys nothing while hiding a resolution failure.
+// The loader inject list is about LOAD ORDER, not type dependencies: the chips
+// seat lives in a slot the chat client declares and gates on a standard hook it
+// provides, so `ui-chat` (and the conversation shell it builds on) must compose
+// before this plugin. Packages outside that chain must stay off the list — a
+// `link:`ed profile dependency cannot resolve the app's own `@deepseek-ai/*`
+// modules, and listing one buys nothing while hiding a resolution failure.
 check(
-  'dsh.client.inject lists only the conversation client',
-  Array.isArray(decl?.inject) && decl.inject.length === 1 && decl.inject[0] === '@deepseek-ai/dsh-client-ui-conversation',
+  'dsh.client.inject lists the conversation and chat clients',
+  Array.isArray(decl?.inject)
+    && decl.inject.length === 2
+    && decl.inject[0] === '@deepseek-ai/dsh-client-ui-conversation'
+    && decl.inject[1] === '@deepseek-ai/dsh-client-ui-chat',
   JSON.stringify(decl?.inject),
 )
 
@@ -269,29 +274,20 @@ function slotRegister(options, component) {
   return () => {}
 }
 
-check('registers exactly the settings and action dictionary namespaces',
-  seen.dictionaries.length === 2 && new Set(seen.dictionaries).size === 2
-    && seen.dictionaries.includes(NS) && seen.dictionaries.includes('suggest-prompt.actions'),
+check('registers the settings dictionary namespace',
+  seen.dictionaries.length === 1 && seen.dictionaries[0] === NS,
   seen.dictionaries.join(', '))
 check('binds the entry config form', seen.forms.includes(ENTRY_ID), seen.forms.join(', '))
 
-// --- The ghost overlay (unchanged surface, still load-bearing) -------------
-const overlayEntry = seen.entries.find((entry) => entry.slot === 'conversation.input.overlay')
-check('registers the conversation.input.overlay ghost entry', overlayEntry !== undefined)
+// --- The chip row under the newest completed turn --------------------------
+const tailEntry = seen.entries.find((entry) => entry.slot === 'conversation.chat.turnTail')
+check('registers the conversation.chat.turnTail chip entry', tailEntry !== undefined)
 check(
-  'ghost entry keeps the suggest-prompt id and order',
-  overlayEntry?.id === ENTRY_ID && overlayEntry?.order === 30,
-  JSON.stringify(overlayEntry ? { id: overlayEntry.id, order: overlayEntry.order } : null),
+  'chip entry is addressed by the plugin id and keeps order 30',
+  tailEntry?.id === 'suggest-chips' && tailEntry?.order === 30,
+  JSON.stringify(tailEntry ? { id: tailEntry.id, order: tailEntry.order } : null),
 )
-
-// --- Touch/manual actions (public toolbar, locale-bound) -------------------
-const actionEntries = seen.entries.filter((entry) => entry.slot === 'conversation.input.right')
-check('registers one public composer action entry', actionEntries.length === 1)
-check('composer action has its own id and localized namespace',
-  actionEntries[0]?.id === 'suggest-prompt-actions' && actionEntries[0]?.order === 30
-    && actionEntries[0]?.locale === 'suggest-prompt.actions',
-  JSON.stringify(actionEntries[0] ? { id: actionEntries[0].id, order: actionEntries[0].order, locale: actionEntries[0].locale } : null))
-check('composer action is a renderable component', typeof actionEntries[0]?.component === 'function')
+check('chip entry is a renderable component', typeof tailEntry?.component === 'function')
 
 // --- The two Plugins-page surfaces ----------------------------------------
 // The configuration form appears on two surfaces because the Plugins page files

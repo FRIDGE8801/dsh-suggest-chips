@@ -1,5 +1,5 @@
 /**
- * Host-side vocabulary of the suggest-prompt domain: the durable storage
+ * Host-side vocabulary of the suggest-chips domain: the durable storage
  * record and the session message-source merge. Kept separate from ./types.ts
  * (the pure client-safe outlet) because these declarations pull dsh-llm into
  * the program — the one-program-per-side layout forbids that on client
@@ -10,7 +10,7 @@
  * appended private `SessionEventMap` types, which wedged sessions on harnesses
  * that cannot mark an appended event ignorable (issue #4); a suggestion is
  * plugin-owned derived state and needs no place in the agent's log.
- * @module @studyzy/dsh-suggest-prompt
+ * @module dsh-suggest-chips
  */
 
 import type { SuggestPromptSuggestion } from './types.ts'
@@ -22,7 +22,7 @@ import type { SuggestPromptSuggestion } from './types.ts'
  */
 export interface SuggestPromptStorageRecord extends SuggestPromptSuggestion {
   /** Format version of the stored record. */
-  readonly version: 1
+  readonly version: 2
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -33,8 +33,8 @@ declare module '@deepseek-ai/dsh-llm' {
      * union is merge-extensible and each producer declares its own kind, so
      * this plugin names itself.
      */
-    'suggest-prompt': {
-      readonly kind: 'suggest-prompt'
+    'suggest-chips': {
+      readonly kind: 'suggest-chips'
       /** Plugin package that produced the message. */
       readonly plugin: string
       /** Which part of the auxiliary exchange this message carries. */

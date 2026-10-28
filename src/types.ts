@@ -1,5 +1,5 @@
 /**
- * Pure types of the suggest-prompt domain: the shared suggestion payload and
+ * Pure types of the suggest-chips domain: the shared suggestion payload and
  * the host-only transcript fold state, free of this package's host-side imports
  * (cordis events, dsh-llm, the plugin). The deployment {@link Config} lives on
  * the plugin itself (`src/index.ts`) because the config catalog pastes
@@ -13,32 +13,24 @@
  * sessions unreadable on cold read (issue #4); the value travels over this
  * plugin's own `connection.rpc` channel instead (see ./records.ts).
  *
- * @module @studyzy/dsh-suggest-prompt/types
+ * @module dsh-suggest-chips/types
  */
 
-/** The suggestion generated after one completed turn, whole-value per record. */
+/** The suggestions generated after one completed turn, whole-value per record. */
 export interface SuggestPromptSuggestion {
   /** Completed turn whose completion this suggestion answers. */
   readonly turn: number
   /** Seq of the last model-visible message the transcript was built from. */
   readonly baseSeq: number
-  /** Sanitized, single-line suggestion text (accepted into the composer). */
-  readonly text: string
-  /** Whether the model output was truncated to `maxSuggestionChars`. */
-  readonly truncated: boolean
+  /** Sanitized single-line candidate next prompts, best first. */
+  readonly suggestions: readonly string[]
   /** Exact auxiliary LLM route. */
   readonly route?: { readonly provider: string; readonly model: string }
-  /**
-   * Composer shortcut that accepts this suggestion into the draft (for
-   * example `Tab` or `Alt+Slash`), as configured on the host plugin. The
-   * client ghost text intercepts that key while a suggestion is displayed.
-   */
-  readonly acceptKey: string
 }
 
 /**
  * The value the browser read endpoint returns: the latest stored suggestion for
- * one session, or `null` before the first suggestion. The client ghost text
+ * one session, or `null` before the first suggestion. The client chip row
  * reads this; stale suggestions are matched against the session's latest
  * completed turn by `turn`.
  */

@@ -1,10 +1,10 @@
 /**
- * Host-half behavior of the suggest-prompt plugin.
+ * Host-half behavior of the suggest-chips plugin.
  *
  * Durability moved: generation is pure (`generateSuggestion` returns the record
  * and writes nothing) and the plugin persists through its OWN storage domain
  * (`ctx.storageDomain.open(suggestPromptDomainSpec)`), never the session log.
- * The pre-1.2 build appended private `suggest-prompt/…` session events, which
+ * The pre-1.2 build appended private `suggest-chips/…` session events, which
  * `validateStoredEvents` refused on the next cold read (issue #4), so every
  * assertion that used to read a suggestion out of `session.snapshotEvents()` or
  * out of the retired `suggestPrompt` projection now reads the fake domain's
@@ -18,8 +18,8 @@ import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import * as suggestPromptPlugin from '@studyzy/dsh-suggest-prompt'
-import type { Config } from '@studyzy/dsh-suggest-prompt'
+import * as suggestChipsPlugin from 'dsh-suggest-chips'
+import type { Config } from 'dsh-suggest-chips'
 import { apply as installCompanion } from '../src/invariant.ts'
 import {
   buildTranscript,
@@ -29,7 +29,7 @@ import {
   systemPrompt,
 } from '../src/generate.ts'
 import { SUGGEST_DOMAIN_NAME } from '../src/records.ts'
-import { SUGGEST_GENERATE_ROUTE_PATH, SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../src/rpc-contract.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../src/rpc-contract.ts'
 import type { SuggestPromptStorageRecord } from '../src/domain.ts'
 import type { SuggestPromptSuggestion, SuggestPromptTranscriptState } from '../src/types.ts'
 import { applyTranscriptProjection, EMPTY_TRANSCRIPT_STATE } from '../src/transcript.ts'
@@ -43,6 +43,7 @@ const CONFIG = {
   maxRecentTurns: 3,
   maxTranscriptChars: 500,
   maxSuggestionChars: 40,
+  maxSuggestions: 3,
 } as const
 
 /** Adapter that answers immediately with a fixed text and finish sequence. */
@@ -156,12 +157,12 @@ async function bench(config: Config = CONFIG): Promise<Bench> {
   const domain = createFakeDomain()
   installFakeStorage(ctx, domain)
   contexts.push(ctx)
-  await ctx.plugin(suggestPromptPlugin, config)
+  await ctx.plugin(suggestChipsPlugin, config)
   await new Promise(r => setTimeout(r, 30))
   // Surface a mount failure instead of letting it read as "no suggestion".
   for (const entry of (ctx as unknown as { loader?: { entries(): Iterable<{ options?: { id?: string }; fiber?: { error?: unknown } }> } }).loader?.entries?.() ?? []) {
     if (String(entry.options?.id).includes('suggest') && entry.fiber?.error !== undefined) {
-      throw new Error(`suggest-prompt did not activate: ${String(entry.fiber.error)}`)
+      throw new Error(`suggest-chips did not activate: ${String(entry.fiber.error)}`)
     }
   }
   return { ctx, domain, routes }
@@ -248,11 +249,11 @@ describe('resolveSuggestPromptConfig', () => {
       ...CONFIG,
       provider: { get: () => 'acme', set: () => {} },
       model: { get: () => 'acme-1', set: () => {} },
-      acceptKey: { get: () => 'Alt+Slash', set: () => {} },
+      maxSuggestions: { get: () => 2, set: () => {} },
     } as never)
     expect(resolved.provider).toBe('acme')
     expect(resolved.model).toBe('acme-1')
-    expect(resolved.acceptKey).toBe('Alt+Slash')
+    expect(resolved.maxSuggestions).toBe(2)
   })
 
   it('treats an absent volatile reference as an absent override', () => {
@@ -285,10 +286,9 @@ describe('resolveSuggestPromptConfig', () => {
     expect(() => resolveSuggestPromptConfig({ ...CONFIG, provider: '', model: 'm' })).toThrow(/provider override/)
     expect(() => resolveSuggestPromptConfig({ ...CONFIG, model: '' })).toThrow(/model override/)
     expect(() => resolveSuggestPromptConfig({ ...CONFIG, provider: 3 as never })).toThrow(/provider override/)
-    expect(() => resolveSuggestPromptConfig({ ...CONFIG, acceptKey: '' })).toThrow(/acceptKey/)
-    expect(() => resolveSuggestPromptConfig({ ...CONFIG, acceptKey: 3 as never })).toThrow(/acceptKey/)
-    expect(resolveSuggestPromptConfig(CONFIG).acceptKey).toBeUndefined()
-    expect(resolveSuggestPromptConfig({ ...CONFIG, acceptKey: 'Alt+Slash' }).acceptKey).toBe('Alt+Slash')
+    expect(() => resolveSuggestPromptConfig({ ...CONFIG, maxSuggestions: 0 })).toThrow(/maxSuggestions/)
+    expect(() => resolveSuggestPromptConfig({ ...CONFIG, maxSuggestions: 2.5 })).toThrow(/maxSuggestions/)
+    expect(resolveSuggestPromptConfig(CONFIG).maxSuggestions).toBe(3)
   })
 
   it('accepts a partial route override: either member may stand alone', () => {
@@ -302,11 +302,12 @@ describe('resolveSuggestPromptConfig', () => {
 })
 
 describe('systemPrompt', () => {
-  it('bakes the character cap and the reply language into the instruction', () => {
-    const prompt = systemPrompt(40, '简体中文')
-    expect(prompt).toContain('At most 40 visible characters')
+  it('bakes the character cap, the candidate count, and the reply language into the instruction', () => {
+    const prompt = systemPrompt(40, '简体中文', 3)
+    expect(prompt).toContain('at most 40 visible characters')
+    expect(prompt).toContain('between 2 and 3')
     expect(prompt).toContain('Language: 简体中文')
-    expect(systemPrompt(40, 'English')).toContain('Language: English')
+    expect(systemPrompt(40, 'English', 2)).toContain('Language: English')
   })
 })
 
@@ -412,194 +413,28 @@ describe('suggestPromptDomainSpec', () => {
     // The domain is what replaced the session-log record: a plugin-owned name
     // with a per-record layout, so a write rewrites exactly one session's
     // document and an unreadable record is skipped instead of failing the boot.
-    expect(SUGGEST_DOMAIN_NAME).toBe('suggest_prompt')
+    expect(SUGGEST_DOMAIN_NAME).toBe('suggest_chips')
     // The channel must sit under `/api`: Connection's `assertFetchRoute`
     // rejects anything else, and only registered exact paths are dispatched.
-    expect(suggestPromptPlugin.SUGGEST_ROUTE_PATH).toBe('/api/suggest-prompt')
-    expect(suggestPromptPlugin.SUGGEST_ROUTE_METHOD).toBe('POST')
+    expect(suggestChipsPlugin.SUGGEST_ROUTE_PATH).toBe('/api/suggest-chips')
+    expect(suggestChipsPlugin.SUGGEST_ROUTE_METHOD).toBe('POST')
   })
 
   it('round-trips a suggestion through the wire projection', async () => {
     const { toStoredRecord, toSuggestion } = await import('../src/records.ts')
     const suggestion: SuggestPromptSuggestion = {
-      turn: 2, baseSeq: 5, text: '继续', truncated: true,
-      route: { provider: 'main', model: 'main-model' }, acceptKey: 'Tab',
+      turn: 2, baseSeq: 5, suggestions: ['继续', '再试一次'],
+      route: { provider: 'main', model: 'main-model' },
     }
     const record = toStoredRecord(suggestion)
-    expect(record).toEqual({ version: 1, ...suggestion })
+    expect(record).toEqual({ version: 2, ...suggestion })
     expect(toSuggestion(record)).toEqual(suggestion)
     // A restored record carries whatever JSON an earlier build wrote.
-    expect(toSuggestion({ version: 1, turn: 'bad' })).toBeUndefined()
+    expect(toSuggestion({ version: 2, turn: 'bad' })).toBeUndefined()
   })
 })
 
-async function manual(routes: FetchRouteStandin, body: unknown): Promise<Response> {
-  return routes.routes.get(SUGGEST_GENERATE_ROUTE_PATH)!.fetch(new Request(`http://localhost${SUGGEST_GENERATE_ROUTE_PATH}`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body),
-  }))
-}
-
-describe('manual suggestion generation', () => {
-  it('generates durably after automatic silent-empty, and writes no session events', async () => {
-    const { ctx, domain, routes } = await bench()
-    const adapter = new ImmediateAdapter('')
-    const release = ctx.llm.registerAdapter(['main'], adapter)
-    const session = ctx.sessions.create(SessionId('manual-retry'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    const before = session.snapshotEvents()
-    expect((await manual(routes, { sessionId: session.id })).status).toBe(200)
-    expect(adapter.requests).toHaveLength(2)
-    release()
-    ctx.llm.registerAdapter(['main'], new ImmediateAdapter('run the tests'))
-    const response = await manual(routes, { sessionId: session.id })
-    expect(await response.json()).toMatchObject({ status: 'generated', suggestion: { text: 'run the tests', turn: 1 } })
-    expect(domain.records.get(session.id)?.text).toBe('run the tests')
-    expect(session.snapshotEvents()).toEqual(before)
-  })
-
-  it('validates malformed, missing, unknown, empty and running sessions', async () => {
-    const { ctx, routes } = await bench()
-    for (const body of ['{', {}, { sessionId: 2 }, { sessionId: ' ' }]) {
-      expect((await manual(routes, body)).status).toBe(400)
-    }
-    expect((await manual(routes, { sessionId: 'unknown' })).status).toBe(404)
-    const session = ctx.sessions.create(SessionId('manual-empty'))
-    expect(await (await manual(routes, { sessionId: session.id })).json()).toEqual({ suggestion: null, status: 'no-context' })
-    session.append('turn/start', { turn: 1 })
-    expect((await manual(routes, { sessionId: session.id })).status).toBe(409)
-    session.append('turn/end', { turn: 1, reason: { kind: 'interrupted' } })
-    expect(await (await manual(routes, { sessionId: session.id })).json()).toEqual({ suggestion: null, status: 'no-context' })
-  })
-
-  it('a newer automatic completion supersedes manual without losing its slot', async () => {
-    const { ctx, routes, domain } = await bench()
-    const release = ctx.llm.registerAdapter(['main'], new ImmediateAdapter(''))
-    const session = ctx.sessions.create(SessionId('manual-auto-supersede'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    release()
-    const adapter = new GatedAdapter()
-    ctx.llm.registerAdapter(['main'], adapter)
-    const pending = manual(routes, { sessionId: session.id })
-    await settle()
-    appendTurn(session, 2, 'test login', 'tested')
-    await settle()
-    expect(adapter.requests).toHaveLength(2)
-    adapter.release()
-    expect((await pending).status).toBe(409)
-    expect((await manual(routes, { sessionId: session.id })).status).toBe(409)
-    adapter.release()
-    await settle()
-    expect(domain.records.get(session.id)?.turn).toBe(2)
-  })
-
-  it('a failed manual generation leaves an existing suggestion readable', async () => {
-    const { ctx, routes, domain } = await bench()
-    const release = ctx.llm.registerAdapter(['main'], new ImmediateAdapter('run the tests'))
-    const session = ctx.sessions.create(SessionId('manual-failure-keeps-tip'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    release()
-    expect(domain.records.get(session.id)?.text).toBe('run the tests')
-
-    ctx.llm.registerAdapter(['main'], new ThrowingAdapter())
-    const response = await manual(routes, { sessionId: session.id })
-    expect(response.status).toBe(502)
-    expect(await response.json()).toEqual({ suggestion: null, status: 'error' })
-    // Retiring first would trade a working tip for nothing on a transient
-    // model failure, which is the most likely outcome of an explicit call.
-    expect(domain.records.get(session.id)?.text).toBe('run the tests')
-  })
-
-  it('retires the previous tip when the manual call targets a newer turn', async () => {
-    const { ctx, routes, domain } = await bench()
-    const release = ctx.llm.registerAdapter(['main'], new ImmediateAdapter('run the tests'))
-    const session = ctx.sessions.create(SessionId('manual-newer-turn'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    release()
-    expect(domain.records.get(session.id)?.turn).toBe(1)
-
-    // Turn 2 completes but its own generation fails, so turn 1's record is the
-    // only one left. The manual call targets turn 2, which nothing answers, so
-    // it retires that stale tip before dispatching.
-    ctx.llm.registerAdapter(['main'], new ThrowingAdapter())
-    appendTurn(session, 2, 'test login', 'tested')
-    await settle()
-    await settle()
-    expect((await manual(routes, { sessionId: session.id })).status).toBe(502)
-    expect(domain.records.has(session.id)).toBe(false)
-  })
-
-  it('shares one flight with auto, rejects duplicate manual calls, and supersedes on start', async () => {
-    const { ctx, routes, domain } = await bench()
-    const adapter = new GatedAdapter()
-    ctx.llm.registerAdapter(['main'], adapter)
-    const session = ctx.sessions.create(SessionId('manual-flight'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    expect((await manual(routes, { sessionId: session.id })).status).toBe(409)
-    adapter.release()
-    await settle()
-    const pending = manual(routes, { sessionId: session.id })
-    await settle()
-    expect((await manual(routes, { sessionId: session.id })).status).toBe(409)
-    session.append('turn/start', { turn: 2 })
-    expect(adapter.requests[1]?.signal?.aborted).toBe(true)
-    adapter.release()
-    expect((await pending).status).toBe(409)
-    // A manual call never retires a record that already answers its turn: only
-    // the turn-2 completion supersedes turn 1, so this is still the turn-1 tip.
-    expect(domain.records.get(session.id)?.turn).toBe(1)
-  })
-
-  it('removes an obsolete manual put that finishes after a new turn starts', async () => {
-    const { ctx, routes, domain } = await bench()
-    const release = ctx.llm.registerAdapter(['main'], new ImmediateAdapter(''))
-    const session = ctx.sessions.create(SessionId('manual-slow-put'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    release()
-    ctx.llm.registerAdapter(['main'], new ImmediateAdapter('run the tests'))
-    const table = domain.table('sessions')
-    const originalPut = table.put.bind(table)
-    let releasePut!: () => void
-    const gate = new Promise<void>(resolve => { releasePut = resolve })
-    table.put = async (key, value) => { await gate; await originalPut(key, value) }
-    const pending = manual(routes, { sessionId: session.id })
-    await settle()
-    session.append('turn/start', { turn: 2 })
-    releasePut()
-    expect((await pending).status).toBe(409)
-    expect(domain.records.has(session.id)).toBe(false)
-  })
-
-  it('aborts manual generation on dispose and hides provider failure details', async () => {
-    const { ctx, routes, domain } = await bench()
-    const release = ctx.llm.registerAdapter(['main'], new ImmediateAdapter(''))
-    const session = ctx.sessions.create(SessionId('manual-dispose'))
-    appendTurn(session, 1, 'fix login', 'fixed')
-    await settle()
-    release()
-    const releaseFailure = ctx.llm.registerAdapter(['main'], new ThrowingAdapter())
-    const failure = await manual(routes, { sessionId: session.id })
-    expect(failure.status).toBe(502)
-    expect(await failure.json()).toEqual({ status: 'error', suggestion: null })
-    releaseFailure()
-    const adapter = new GatedAdapter()
-    ctx.llm.registerAdapter(['main'], adapter)
-    const pending = manual(routes, { sessionId: session.id })
-    await settle()
-    await ctx.fiber.dispose()
-    expect(adapter.requests[0]?.signal?.aborted).toBe(true)
-    adapter.release()
-    expect((await pending).status).toBe(409)
-    expect(domain.puts).toBe(0)
-  })
-})
-
-describe('suggest-prompt plugin generation', () => {
+describe('suggest-chips plugin generation', () => {
   it('generates one suggestion per completed turn and stores it durably', async () => {
     const { ctx, domain } = await bench()
     const adapter = new ImmediateAdapter()
@@ -610,26 +445,24 @@ describe('suggest-prompt plugin generation', () => {
     await settle()
 
     expect(adapter.requests).toHaveLength(1)
-    expect(adapter.requests[0]).toMatchObject({ provider: 'main', model: 'main-model', purpose: 'suggest-prompt', maxTokens: 32 })
-    expect(adapter.requests[0]?.system).toBe(systemPrompt(40, '简体中文'))
+    expect(adapter.requests[0]).toMatchObject({ provider: 'main', model: 'main-model', purpose: 'suggest-chips', maxTokens: 32 })
+    expect(adapter.requests[0]?.system).toBe(systemPrompt(40, '简体中文', 3))
 
     // Nothing at all enters the log: the durable channel is the plugin's own
     // storage domain, and a plugin-private session event is exactly what wedged
     // sessions on cold read (issue #4).
     expect(session.snapshotEvents().map(event => event.type as string)
-      .filter(type => type.startsWith('suggest-prompt') || type.startsWith('plugin:'))).toEqual([])
+      .filter(type => type.startsWith('suggest-chips') || type.startsWith('plugin:'))).toEqual([])
 
     // One write, one record, keyed by session id and carrying the whole value.
     expect(domain.puts).toBe(1)
     expect([...domain.records.keys()]).toEqual(['happy-path'])
     expect(storedRecord(domain, 'happy-path')).toEqual({
-      version: 1,
+      version: 2,
       turn: 1,
       baseSeq: expect.any(Number),
-      text: '继续修复登录页',
-      truncated: false,
+      suggestions: ['继续修复登录页'],
       route: { provider: 'main', model: 'main-model' },
-      acceptKey: 'Tab',
     })
   })
 
@@ -647,10 +480,8 @@ describe('suggest-prompt plugin generation', () => {
     expect(await routes.request('route-read')).toEqual({
       turn: 1,
       baseSeq: expect.any(Number),
-      text: '继续修复登录页',
-      truncated: false,
+      suggestions: ['继续修复登录页'],
       route: { provider: 'main', model: 'main-model' },
-      acceptKey: 'Tab',
     })
     // A malformed body is answered with null rather than throwing.
     expect(await routes.request('not-an-object')).toBeNull()
@@ -683,15 +514,15 @@ describe('suggest-prompt plugin generation', () => {
     expect(adapter.requests[0]).toMatchObject({ provider: 'other', model: 'other-model' })
   })
 
-  it('carries the configured accept key on the stored record', async () => {
-    const { ctx, domain } = await bench({ ...CONFIG, acceptKey: 'Alt+Slash' })
-    const adapter = new ImmediateAdapter('继续修复登录页')
+  it('caps the stored candidates at the configured maxSuggestions', async () => {
+    const { ctx, domain } = await bench({ ...CONFIG, maxSuggestions: 2 })
+    const adapter = new ImmediateAdapter('["run the tests","commit this","show the diff"]')
     ctx.llm.registerAdapter(['main'], adapter)
-    const session = ctx.sessions.create(SessionId('accept-key'))
+    const session = ctx.sessions.create(SessionId('max-suggestions'))
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(storedRecord(domain, 'accept-key')?.acceptKey).toBe('Alt+Slash')
+    expect(storedRecord(domain, 'max-suggestions')?.suggestions).toEqual(['run the tests', 'commit this'])
   })
 
   it('defaults maxRecentTurns to 1, sending only the last completed turn', async () => {
@@ -765,7 +596,7 @@ describe('suggest-prompt plugin generation', () => {
     // it rather than paying for the same suggestion twice. It is seeded BEFORE
     // the first completed turn, which is when the plugin seeds its cursor.
     seedStored(domain, 'reload-dedupe', {
-      version: 1, turn: 1, baseSeq: 4, text: '已有建议', truncated: false, acceptKey: 'Tab',
+      version: 2, turn: 1, baseSeq: 4, suggestions: ['已有建议'],
     })
     session.append('turn/start', { turn: 1 })
     session.append('user/message', userMessage('问题'), { surfaceOp: 'append' })
@@ -778,7 +609,7 @@ describe('suggest-prompt plugin generation', () => {
     expect(adapter.requests).toHaveLength(0)
     expect(domain.puts).toBe(0)
     // The pre-existing record is untouched, not overwritten with a fresh one.
-    expect(storedRecord(domain, 'reload-dedupe')?.text).toBe('已有建议')
+    expect(storedRecord(domain, 'reload-dedupe')?.suggestions).toEqual(['已有建议'])
   })
 
   it('still generates when the stored record answers an older turn', async () => {
@@ -789,7 +620,7 @@ describe('suggest-prompt plugin generation', () => {
     ctx.llm.registerAdapter(['main'], adapter)
     const session = ctx.sessions.create(SessionId('stale-record'))
     seedStored(domain, 'stale-record', {
-      version: 1, turn: 1, baseSeq: 4, text: '旧建议', truncated: false, acceptKey: 'Tab',
+      version: 2, turn: 1, baseSeq: 4, suggestions: ['旧建议'],
     })
     appendTurn(session, 1, '问题一', '回答一')
     appendTurn(session, 2, '问题二', '回答二')
@@ -798,7 +629,7 @@ describe('suggest-prompt plugin generation', () => {
     await settle()
     expect(adapter.requests).toHaveLength(1)
     expect(storedRecord(domain, 'stale-record')?.turn).toBe(2)
-    expect(storedRecord(domain, 'stale-record')?.text).toBe('继续修复登录页')
+    expect(storedRecord(domain, 'stale-record')?.suggestions).toEqual(['继续修复登录页'])
   })
 
   it('aborts an in-flight generation when the next turn completes', async () => {
@@ -834,7 +665,7 @@ describe('suggest-prompt plugin generation', () => {
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('suggest-prompt: suggestion generation failed'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('suggest-chips: suggestion generation failed'))
     expect(domain.puts).toBe(0)
     expect(domain.records.size).toBe(0)
   })
@@ -920,7 +751,7 @@ describe('suggest-prompt plugin generation', () => {
     appendTurn(session, 1, '问题', '回答')
 
     await settle()
-    expect(storedRecord(domain, 'sanitized')?.text).toBe('建议文本')
+    expect(storedRecord(domain, 'sanitized')?.suggestions).toEqual(['建议文本'])
   })
 
   it('silently drops a semantically rejectable suggestion', async () => {
@@ -957,8 +788,7 @@ describe('suggest-prompt plugin generation', () => {
 
     await settle()
     const stored = storedRecord(domain, 'truncated')!
-    expect(stored.truncated).toBe(true)
-    expect(Array.from(stored.text).length).toBe(40)
+    expect(Array.from(stored.suggestions[0]!).length).toBe(40)
   })
 })
 
@@ -1082,7 +912,7 @@ describe('generateSuggestion direct boundary', () => {
     // Generation is pure with respect to durability: with no usable reply there
     // is nothing to hand back, and the session log is untouched either way.
     expect(session.snapshotEvents().map(event => event.type as string)
-      .filter(type => type.startsWith('suggest-prompt'))).toEqual([])
+      .filter(type => type.startsWith('suggest-chips'))).toEqual([])
   })
 
   it('returns the record instead of writing it, leaving persistence to the caller', async () => {
@@ -1102,27 +932,8 @@ describe('generateSuggestion direct boundary', () => {
       foldTranscript(session),
       new AbortController().signal,
     )
-    expect(result).toMatchObject({ version: 1, turn: 1, text: 'run the tests', acceptKey: 'Tab' })
+    expect(result).toMatchObject({ version: 2, turn: 1, suggestions: ['run the tests'] })
     expect(session.snapshotEvents()).toHaveLength(before)
-  })
-
-  it('defaults the accept key to Tab when the config omits it', async () => {
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    contexts.push(ctx)
-    const adapter = new ImmediateAdapter('run the tests')
-    ctx.llm.registerAdapter(['main'], adapter)
-    const session = Session.create(SessionId('default-accept-key'))
-    appendTurn(session, 1, '问题', '回答')
-    const result = await generateSuggestion(
-      ctx,
-      resolveSuggestPromptConfig(CONFIG),
-      session,
-      1,
-      foldTranscript(session),
-      new AbortController().signal,
-    )
-    expect(result?.acceptKey).toBe('Tab')
   })
 
   it('defaults the transcript window to the last turn when maxRecentTurns is omitted', async () => {
@@ -1155,7 +966,7 @@ describe('generateSuggestion direct boundary', () => {
   })
 })
 
-describe('suggest-prompt log prohibition invariant', () => {
+describe('suggest-chips log prohibition invariant', () => {
   /** A context with the invariant registry and companion mounted over sessions. */
   async function invariantCtx(): Promise<Context> {
     const ctx = new Context()
@@ -1180,16 +991,16 @@ describe('suggest-prompt log prohibition invariant', () => {
     // live in the storage domain, never in the agent's conversation log.
     const ctx = await invariantCtx()
     const session = ctx.sessions.create(SessionId('inv-suggested'))
-    expect(() => session.append('suggest-prompt/suggested' as never, {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    expect(() => session.append('suggest-chips/suggested' as never, {
+      version: 2, turn: 1, baseSeq: 2, suggestions: ['建议'],
     } as never)).toThrow(/must not write session-log events/)
   })
 
   it('rejects the plugin-record spelling as well', async () => {
     const ctx = await invariantCtx()
     const session = ctx.sessions.create(SessionId('inv-plugin-record'))
-    expect(() => session.append('plugin:suggest-prompt/suggested' as never, {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+    expect(() => session.append('plugin:suggest-chips/suggested' as never, {
+      version: 2, turn: 1, baseSeq: 2, suggestions: ['建议'],
     } as never)).toThrow(/must not write session-log events/)
   })
 
@@ -1207,9 +1018,9 @@ describe('plugin mount composition', () => {
     // `rpc.handle` surface is the one that reads `webServer` — and it reads it
     // on the CONNECTION fiber, which never injects it, so that call throws
     // there no matter what this list says. See `SUGGEST_ROUTE_PATH`.
-    expect(suggestPromptPlugin.inject)
+    expect(suggestChipsPlugin.inject)
       .toEqual(['llm', 'sessions', 'storageDomain', 'connection'])
-    expect(suggestPromptPlugin.name).toBe('suggest-prompt')
+    expect(suggestChipsPlugin.name).toBe('suggest-chips')
   })
 
   it('registers its browser route through connection.fetch, not webServer', async () => {
@@ -1224,8 +1035,8 @@ describe('plugin mount composition', () => {
     //
     // `connection.fetch.register` writes only to the connection's own route
     // table, so it carries no such dependency.
-    expect(suggestPromptPlugin.inject).toContain('connection')
-    expect(suggestPromptPlugin.inject).not.toContain('webServer')
+    expect(suggestChipsPlugin.inject).toContain('connection')
+    expect(suggestChipsPlugin.inject).not.toContain('webServer')
 
     const { ctx, routes } = await bench()
     const seen: string[] = []
@@ -1234,7 +1045,7 @@ describe('plugin mount composition', () => {
     appendTurn(session, 1, '问题', '回答')
     await settle()
     expect(seen).toContain('turn/end')
-    expect([...routes.routes.keys()]).toContain(suggestPromptPlugin.SUGGEST_ROUTE_PATH)
+    expect([...routes.routes.keys()]).toContain(suggestChipsPlugin.SUGGEST_ROUTE_PATH)
   })
 
   it('registers only the host-only transcript projection, never a client-visible one', async () => {

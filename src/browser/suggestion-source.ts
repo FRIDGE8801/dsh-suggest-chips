@@ -22,27 +22,27 @@
  * purely reactive read would show nothing; the interval is deliberately modest
  * because each poll is one cheap local loopback call, and polling stops as soon
  * as the component unmounts.
- * @module @studyzy/dsh-suggest-prompt/browser/suggestion-source
+ * @module dsh-suggest-chips/browser/suggestion-source
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import type { SuggestPromptSuggestion } from '../types.ts'
-import { SUGGEST_GENERATE_ROUTE_PATH, SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../rpc-contract.ts'
+import { SUGGEST_ROUTE_METHOD, SUGGEST_ROUTE_PATH } from '../rpc-contract.ts'
 
 /**
  * Poll interval for the stored suggestion, in milliseconds.
  *
  * The host write lands shortly after a turn completes; a sub-second poll keeps
- * the ghost text feeling immediate while costing one loopback request per
- * interval per mounted composer (the composer is a singleton per session).
+ * the chip row feeling immediate while costing one loopback request per
+ * interval per mounted turn tail (only the newest turn mounts a poller).
  */
 export const POLL_INTERVAL_MS = 700
 
 /**
  * Read the stored suggestion for one session.
  *
- * Every failure mode returns `null` rather than throwing: this feeds ghost text
- * inside the composer, and a broken read must degrade to "no suggestion"
+ * Every failure mode returns `null` rather than throwing: this feeds chip text
+ * under a completed turn, and a broken read must degrade to "no suggestion"
  * instead of surfacing an error where the user is typing.
  * @param sessionId - session whose suggestion is read.
  * @param signal - abort signal for the request.
@@ -60,7 +60,7 @@ export async function fetchSuggestion(
       signal,
     })
     if (!response.ok) {
-      warnOnce(`suggest-prompt: read failed with HTTP ${String(response.status)}`)
+      warnOnce(`suggest-chips: read failed with HTTP ${String(response.status)}`)
       return null
     }
     const body: unknown = await response.json()
@@ -71,49 +71,21 @@ export async function fetchSuggestion(
     // failure shows nothing rather than a broken composer. It is still
     // reported once: a silent catch here is indistinguishable from "no
     // suggestion yet", which makes a misconfigured channel undebuggable.
-    warnOnce(`suggest-prompt: read threw ${String(error)}`)
+    warnOnce(`suggest-chips: read threw ${String(error)}`)
     return null
   }
 }
 
-/** Validate data before it can become editor text or a shortcut matcher. */
+/** Validate data before it can become chip text. */
 function isSuggestion(value: unknown): value is SuggestPromptSuggestion {
   if (typeof value !== 'object' || value === null) return false
   const record = value as Record<string, unknown>
-  return typeof record.text === 'string' && record.text.trim() !== ''
+  return Array.isArray(record.suggestions)
+    && record.suggestions.length > 0
+    && record.suggestions.length <= 5
+    && record.suggestions.every(item => typeof item === 'string' && item.trim() !== '')
     && Number.isSafeInteger(record.turn) && Number(record.turn) >= 0
     && Number.isSafeInteger(record.baseSeq) && Number(record.baseSeq) >= 0
-    && typeof record.truncated === 'boolean'
-    && (record.acceptKey === undefined || typeof record.acceptKey === 'string')
-}
-
-export type ManualSuggestionResult =
-  | { readonly status: 'generated'; readonly suggestion: SuggestPromptSuggestion }
-  | { readonly status: 'empty' | 'busy' | 'no-context' | 'error'; readonly suggestion: null }
-
-/** One explicit, bounded host request. It never writes the composer draft. */
-export async function requestSuggestion(sessionId: string, signal: AbortSignal): Promise<ManualSuggestionResult> {
-  try {
-    const response = await fetch(SUGGEST_GENERATE_ROUTE_PATH, {
-      method: SUGGEST_ROUTE_METHOD,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
-      signal,
-    })
-    const body: unknown = await response.json()
-    if (typeof body !== 'object' || body === null || !('status' in body)) {
-      return { status: 'error', suggestion: null }
-    }
-    if (response.status === 409 && body.status === 'busy') return { status: 'busy', suggestion: null }
-    if (!response.ok) return { status: 'error', suggestion: null }
-    if (body.status === 'generated' && 'suggestion' in body && isSuggestion(body.suggestion)) {
-      return { status: 'generated', suggestion: body.suggestion }
-    }
-    if (body.status === 'empty' || body.status === 'no-context') return { status: body.status, suggestion: null }
-    return { status: 'error', suggestion: null }
-  } catch {
-    return { status: 'error', suggestion: null }
-  }
 }
 
 /** Whether the one-shot transport diagnostic has already been emitted. */
@@ -197,9 +169,8 @@ function sameSuggestion(
   if (left === null || right === null) return left === right
   return left.turn === right.turn
     && left.baseSeq === right.baseSeq
-    && left.text === right.text
-    && left.truncated === right.truncated
-    && left.acceptKey === right.acceptKey
+    && left.suggestions.length === right.suggestions.length
+    && left.suggestions.every((text, index) => text === right.suggestions[index])
     && left.route?.provider === right.route?.provider
     && left.route?.model === right.route?.model
 }

@@ -3,7 +3,7 @@
  * without ever touching the session log.
  *
  * Issue #4 history (why this is NOT a session event): the pre-1.2 build wrote
- * `suggest-prompt/request` and `suggest-prompt/suggested` through
+ * `suggest-chips/request` and `suggest-chips/suggested` through
  * `Session.append`. Those types are outside the harness's closed
  * `KNOWN_SESSION_EVENT_TYPES`, and `0.2.0-rc.2` offers no way to mark an
  * appended event `ignorable`, so `validateStoredEvents` refused the whole log
@@ -20,11 +20,11 @@
  * harness, and it needs no harness change and no app repackaging. With zero
  * session-log writes, issue #4 cannot recur by construction.
  *
- * Records live one per session under the `suggest_prompt` domain
- * (`<dshHome>/storages/suggest_prompt/sessions/`), so a write rewrites one
+ * Records live one per session under the `suggest_chips` domain
+ * (`<dshHome>/storages/suggest_chips/sessions/`), so a write rewrites one
  * session's document. The record is disposable derived data: an unreadable
  * record is backed up and skipped rather than failing the boot.
- * @module @studyzy/dsh-suggest-prompt/records
+ * @module dsh-suggest-chips/records
  */
 
 import { z } from 'zod'
@@ -35,16 +35,14 @@ import type { SuggestPromptStorageRecord } from './domain.ts'
 import type { SuggestPromptSuggestion } from './types.ts'
 
 /** The stored-record name; also the domain's identity on the medium. */
-export const SUGGEST_DOMAIN_NAME = 'suggest_prompt'
+export const SUGGEST_DOMAIN_NAME = 'suggest_chips'
 
 /** Validates one stored suggestion record at the durable boundary. */
 const storedSuggestionSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   turn: z.number().int().positive(),
   baseSeq: z.number().int().nonnegative(),
-  text: z.string().min(1),
-  truncated: z.boolean(),
-  acceptKey: z.string().min(1),
+  suggestions: z.array(z.string().min(1)).min(1).max(5),
   route: z.object({
     provider: z.string().min(1),
     model: z.string().min(1),
@@ -84,12 +82,10 @@ export type StoredSuggestion = z.infer<typeof storedSuggestionSchema>
  */
 export function toStoredRecord(suggestion: SuggestPromptSuggestion): SuggestPromptStorageRecord {
   return {
-    version: 1,
+    version: 2,
     turn: suggestion.turn,
     baseSeq: suggestion.baseSeq,
-    text: suggestion.text,
-    truncated: suggestion.truncated,
-    acceptKey: suggestion.acceptKey,
+    suggestions: [...suggestion.suggestions],
     ...(suggestion.route !== undefined ? { route: suggestion.route } : {}),
   }
 }
@@ -106,9 +102,7 @@ export function toSuggestion(record: unknown): SuggestPromptSuggestion | undefin
   return {
     turn: stored.turn,
     baseSeq: stored.baseSeq,
-    text: stored.text,
-    truncated: stored.truncated,
-    acceptKey: stored.acceptKey,
+    suggestions: [...stored.suggestions],
     ...(stored.route !== undefined ? { route: stored.route } : {}),
   }
 }

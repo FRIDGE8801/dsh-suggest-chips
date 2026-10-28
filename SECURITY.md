@@ -31,12 +31,13 @@ Two areas are especially relevant:
 
 - **Credential handling.** Suggestions are generated through an auxiliary model
   call. The transcript is redacted (`redactSecrets` in `src/sanitize.ts`) before
-  it is sent, and the exact model-visible payload is recorded in the session log
-  as a `suggest-prompt/request` event. A case where a secret reaches the model or
-  the log *unredacted* is a security bug.
-- **Session-log content.** The suggestion prompt is derived from conversation
-  content. A path that leaks content into a place it should not appear — another
-  session, the client wire payload, or a log line — is in scope.
+  it is sent, and the plugin writes **nothing** to the session log — the result
+  is stored in its own storage domain. A case where a secret reaches the model,
+  a persisted suggestion, or any log line *unredacted* is a security bug.
+- **Suggestion storage.** Stored suggestions are readable by the same-origin
+  browser route (`POST /api/suggest-chips`) for the session that owns them. A
+  path that exposes one session's suggestions to another session, or to an
+  unauthenticated caller, is in scope.
 
 Vulnerabilities in the harness itself, or in the upstream `@deepseek-ai/*`
 packages, should be reported to the

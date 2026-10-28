@@ -1,5 +1,5 @@
 /**
- * suggest-prompt invariant behavior: the companion enforces this package's
+ * suggest-chips invariant behavior: the companion enforces this package's
  * session-log prohibition — a suggestion is never written as a session event.
  *
  * That prohibition is the durable guarantee behind issue #4: private
@@ -21,9 +21,9 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { apply as installCompanion } from '../src/invariant.ts'
 
 /** The historical event type this package must never write again. */
-const FORBIDDEN_TYPE = 'suggest-prompt/suggested'
+const FORBIDDEN_TYPE = 'suggest-chips/suggested'
 /** The plugin-record spelling a 1.2.x build used. */
-const FORBIDDEN_PLUGIN_TYPE = 'plugin:suggest-prompt/suggested'
+const FORBIDDEN_PLUGIN_TYPE = 'plugin:suggest-chips/suggested'
 
 /** Mount the invariant registry, session store, and this companion. */
 async function mount(): Promise<Context> {
@@ -34,7 +34,7 @@ async function mount(): Promise<Context> {
   return ctx
 }
 
-describe('suggest-prompt invariant companion', () => {
+describe('suggest-chips invariant companion', () => {
   it('accepts ordinary session traffic', async () => {
     const ctx = await mount()
     const session = ctx.sessions.create(SessionId('ordinary'))
@@ -49,7 +49,7 @@ describe('suggest-prompt invariant companion', () => {
     const ctx = await mount()
     const session = ctx.sessions.create(SessionId('forbidden'))
     expect(() => session.append(FORBIDDEN_TYPE as never, {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+      version: 2, turn: 1, baseSeq: 2, suggestions: ['建议'],
     } as never)).toThrow(/must not write session-log events/)
     await ctx.fiber.dispose()
   })
@@ -58,7 +58,7 @@ describe('suggest-prompt invariant companion', () => {
     const ctx = await mount()
     const session = ctx.sessions.create(SessionId('forbidden-plugin'))
     expect(() => session.append(FORBIDDEN_PLUGIN_TYPE as never, {
-      version: 1, turn: 1, baseSeq: 2, text: '建议', truncated: false, acceptKey: 'Tab',
+      version: 2, turn: 1, baseSeq: 2, suggestions: ['建议'],
     } as never)).toThrow(/must not write session-log events/)
     await ctx.fiber.dispose()
   })

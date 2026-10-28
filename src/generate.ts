@@ -5,7 +5,7 @@
  * suggestion payload and the caller persists it through the plugin's own
  * storage domain (see ./records.ts). Nothing is ever written to the session
  * log — that is what made sessions unreadable (issue #4).
- * @module @studyzy/dsh-suggest-prompt/generate
+ * @module dsh-suggest-chips/generate
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -19,7 +19,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { deadline, MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { SuggestPromptStorageRecord } from './domain.ts'
-import { cleanSuggestion, hasCJK, sanitizeSuggestion, shouldFilterSuggestion } from './sanitize.ts'
+import { hasCJK, parseSuggestionList } from './sanitize.ts'
 import type { SuggestPromptTranscriptState } from './types.ts'
 import type { Config } from './index.ts'
 
@@ -36,12 +36,12 @@ const SUGGEST_REASONING_EFFORT = ReasoningEffortId('off')
 
 /**
  * Informational purpose tag for auxiliary suggestion calls. The published
- * `GenerateOptions['purpose']` union predates the suggest-prompt capability and
+ * `GenerateOptions['purpose']` union predates the suggest-chips capability and
  * no provider tailors transport for it yet, so the literal widens through
- * `unknown` once; the runtime value stays `'suggest-prompt'` for providers that
+ * `unknown` once; the runtime value stays `'suggest-chips'` for providers that
  * learn it later.
  */
-const SUGGEST_PURPOSE = 'suggest-prompt' as unknown as Exclude<GenerateOptions['purpose'], undefined>
+const SUGGEST_PURPOSE = 'suggest-chips' as unknown as Exclude<GenerateOptions['purpose'], undefined>
 
 /** Validated immutable suggestion policy. */
 export interface ResolvedSuggestPromptConfig extends Config {}
@@ -54,15 +54,15 @@ const CONFIG_KEYS: ReadonlySet<string> = new Set([
   'maxRecentTurns',
   'maxTranscriptChars',
   'maxSuggestionChars',
+  'maxSuggestions',
   'provider',
   'model',
-  'acceptKey',
 ])
 
 /** Validate one positive integer limit. */
 function assertPositiveInteger(name: string, value: number): void {
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`suggest-prompt: ${name} must be a positive integer`)
+    throw new Error(`suggest-chips: ${name} must be a positive integer`)
   }
 }
 
@@ -110,11 +110,11 @@ function unwrapVolatileFields(config: Record<string, unknown>): Record<string, u
 export function resolveSuggestPromptConfig(config: Config): ResolvedSuggestPromptConfig {
   const candidate: unknown = config
   if (candidate === null || typeof candidate !== 'object') {
-    throw new Error('suggest-prompt: configuration is required')
+    throw new Error('suggest-chips: configuration is required')
   }
   const value = unwrapVolatileFields(candidate as Record<string, unknown>) as unknown as Config
   for (const key of Object.keys(value)) {
-    if (!CONFIG_KEYS.has(key)) throw new Error(`suggest-prompt: unknown config key "${key}"`)
+    if (!CONFIG_KEYS.has(key)) throw new Error(`suggest-chips: unknown config key "${key}"`)
   }
   assertPositiveInteger('maxInputBytes', value.maxInputBytes)
   assertPositiveInteger('maxOutputTokens', value.maxOutputTokens)
@@ -122,73 +122,72 @@ export function resolveSuggestPromptConfig(config: Config): ResolvedSuggestPromp
   if (value.maxRecentTurns !== undefined) assertPositiveInteger('maxRecentTurns', value.maxRecentTurns)
   assertPositiveInteger('maxTranscriptChars', value.maxTranscriptChars)
   assertPositiveInteger('maxSuggestionChars', value.maxSuggestionChars)
+  if (value.maxSuggestions !== undefined) assertPositiveInteger('maxSuggestions', value.maxSuggestions)
   if (value.timeoutMs > MAX_TIMER_DELAY_MS) {
-    throw new Error(`suggest-prompt: timeoutMs must not exceed ${MAX_TIMER_DELAY_MS}`)
+    throw new Error(`suggest-chips: timeoutMs must not exceed ${MAX_TIMER_DELAY_MS}`)
   }
   // provider and model are independent per-field overrides of the session route:
   // either may be set alone and the missing member falls back to the session's
   // latest logged route (see routeOf). Only a present override is validated.
   if (value.provider !== undefined
     && (typeof value.provider !== 'string' || value.provider.length === 0)) {
-    throw new Error('suggest-prompt: provider override must be a non-empty string')
+    throw new Error('suggest-chips: provider override must be a non-empty string')
   }
   if (value.model !== undefined
     && (typeof value.model !== 'string' || value.model.length === 0)) {
-    throw new Error('suggest-prompt: model override must be a non-empty string')
-  }
-  if (value.acceptKey !== undefined
-    && (typeof value.acceptKey !== 'string' || value.acceptKey.trim().length === 0)) {
-    throw new Error('suggest-prompt: acceptKey must be a non-empty shortcut string')
+    throw new Error('suggest-chips: model override must be a non-empty string')
   }
   return deepFreeze(Object.assign({}, value))
 }
 
 /**
  * Stable instruction for the suggestion extraction call. The model is bound to
- * predicting the user's next prompt in the user's own voice, forbidden from
- * generating content or meta-text; `language` constrains the reply language to
- * match the conversation.
+ * predicting the user's next prompts in the user's own voice, forbidden from
+ * generating content or meta-text, and must answer with a JSON string array of
+ * two to `maxSuggestions` short candidates; `language` constrains the reply
+ * language to match the conversation.
  * @param maxSuggestionChars - visible-character cap baked into the instruction.
  * @param language - reply language ("简体中文" for CJK conversations, else "English").
+ * @param maxSuggestions - hard cap on returned candidates.
  */
-export function systemPrompt(maxSuggestionChars: number, language: string): string {
+export function systemPrompt(maxSuggestionChars: number, language: string, maxSuggestions: number): string {
   return [
-    'You are a prompt suggestion generator. Your ONLY purpose is to predict the user\'s next prompt in a coding-assistant chat — never to generate content.',
+    'You are a prompt suggestion generator. Your ONLY purpose is to predict the user\'s likely next prompts in a coding-assistant chat — never to generate content.',
     '',
     'Your job:',
     '1. Read the user\'s most recent message and the assistant\'s final answer.',
     '2. Predict what the USER would naturally type next — not what the assistant should do.',
+    `3. Offer between 2 and ${maxSuggestions} distinct candidates, most likely first.`,
     '',
     'CRITICAL CONSTRAINTS:',
     '- You are NOT a code generator, writer, or task executor.',
-    '- You MUST respond with ONLY the suggestion text, on a single line.',
+    '- You MUST respond with ONLY a JSON array of strings, e.g. ["run the tests","commit this"].',
     '- NEVER generate, implement, code, or produce any content.',
-    '- NEVER provide explanations, reasoning, or extra text.',
-    '- NEVER use quotes, labels, Markdown, XML, or formatting.',
+    '- NEVER provide explanations, reasoning, or text outside the JSON array.',
+    '- NEVER use labels, Markdown, XML, or code fences.',
     '- Be specific when you can — name files, functions, or actions.',
-    '- If the next step is not obvious, reply with nothing at all.',
+    '- Candidates must be distinct next steps, not rephrasings of one step.',
+    '- If no next step is obvious, reply with an empty array [].',
     '',
     'THE TEST: would the user think "I was just about to type that"?',
     '',
     'EXAMPLES:',
-    'User asked "fix the bug and run tests", bug is fixed -> "run the tests"',
-    'After code written -> "try it out"',
-    'Assistant offers options -> pick the one the user would choose',
-    'Assistant asks to continue -> "yes" or "go ahead"',
-    'Task complete, obvious follow-up -> "commit this" or "push it"',
-    'After an error or misunderstanding -> reply with nothing',
+    'User asked "fix the bug and run tests", bug is fixed -> ["run the tests","commit the fix","show the diff"]',
+    'After code written -> ["try it out","add a test for this"]',
+    'Assistant offers options -> list the options the user would pick',
+    'Task complete, obvious follow-up -> ["commit this","push it"]',
+    'After an error or misunderstanding -> []',
     '',
     'NEVER SUGGEST:',
     '- Evaluative feedback ("looks good", "thanks")',
     '- Questions ("what about...?")',
     '- Assistant-voice phrasing ("Let me...", "I\'ll...", "Here\'s...")',
     '- New ideas the user did not ask about',
-    '- Multiple sentences',
+    '- Multiple sentences per candidate',
     '',
-    'Reply with ONLY the suggestion, 3-12 words, no quotes or explanation. If the next step is not obvious, reply with nothing.',
+    `Reply with ONLY a JSON array of 2-${maxSuggestions} strings, 2-10 words each, no quotes beyond the JSON syntax, no explanation. Each candidate at most ${maxSuggestionChars} visible characters.`,
     '',
     `Language: ${language}`,
-    `At most ${maxSuggestionChars} visible characters.`,
   ].join('\n')
 }
 
@@ -296,7 +295,7 @@ function routeOf(
   if (provider !== undefined && model !== undefined && provider.length > 0 && model.length > 0) {
     return { provider, model }
   }
-  throw new Error('suggest-prompt: no complete route is available; configure provider and model, or run a turn that logs a session route')
+  throw new Error('suggest-chips: no complete route is available; configure provider and model, or run a turn that logs a session route')
 }
 
 /** Translate terminal finish reasons into an auxiliary-call failure. */
@@ -311,12 +310,12 @@ function finishError(finish: FinishReason): Error | undefined {
       return error
     }
     case 'max-tokens':
-      return new Error('suggest-prompt: suggestion output reached maxOutputTokens')
+      return new Error('suggest-chips: suggestion output reached maxOutputTokens')
     case 'tool-calls':
-      return new Error('suggest-prompt: suggestion model unexpectedly requested a tool')
+      return new Error('suggest-chips: suggestion model unexpectedly requested a tool')
     /* v8 ignore next 2 -- FinishReason is a closed five-member union; this default cannot be reached */
     default:
-      return new Error(`suggest-prompt: unsupported finish reason "${String((finish as { kind?: unknown }).kind)}"`)
+      return new Error(`suggest-chips: unsupported finish reason "${String((finish as { kind?: unknown }).kind)}"`)
   }
 }
 
@@ -344,19 +343,19 @@ export async function generateSuggestion(
   signal.throwIfAborted()
   const transcript = buildTranscript(transcriptState, config.maxRecentTurns ?? 1, config.maxTranscriptChars)
   if (transcript === undefined) {
-    throw new Error('suggest-prompt: session has no model-visible transcript to suggest from')
+    throw new Error('suggest-chips: session has no model-visible transcript to suggest from')
   }
   const route = routeOf(session, config)
   const language = suggestionLanguage(transcript.pairs)
-  const system = systemPrompt(config.maxSuggestionChars, language)
+  const system = systemPrompt(config.maxSuggestionChars, language, config.maxSuggestions ?? 3)
   const framed = frameTranscript(transcript.pairs)
   const inputBytes = Buffer.byteLength(framed, 'utf8')
   if (inputBytes > config.maxInputBytes) {
-    throw new Error(`suggest-prompt: input is ${inputBytes} bytes, exceeding maxInputBytes ${config.maxInputBytes}`)
+    throw new Error(`suggest-chips: input is ${inputBytes} bytes, exceeding maxInputBytes ${config.maxInputBytes}`)
   }
   const messages: Message[] = [createUserMessage({
     content: [{ type: 'text', text: framed }],
-    source: { kind: 'suggest-prompt', plugin: 'dsh-suggest-prompt', form: 'transcript' },
+    source: { kind: 'suggest-chips', plugin: 'dsh-suggest-chips', form: 'transcript' },
   })]
   using callDeadline = deadline(signal, config.timeoutMs, SUGGEST_PROMPT_TIMEOUT_CODE)
   const requestOptions = (reasoningOff: boolean): GenerateOptions => deepFreeze({
@@ -394,29 +393,27 @@ export async function generateSuggestion(
     blocks = await drain(requestOptions(false))
   }
   if (blocks.some(block => block.type === 'tool-call')) {
-    throw new Error('suggest-prompt: suggestion output must contain text only')
+    throw new Error('suggest-chips: suggestion output must contain text only')
   }
   const text = blocks
     .filter((block): block is Extract<(typeof blocks)[number], { type: 'text' }> => block.type === 'text')
     .map(block => block.text)
-    .join(' ')
-  // Filter the cleaned-but-untruncated output so verbose replies are dropped,
-  // not silently truncated into a cut-off suggestion.
-  const cleaned = cleanSuggestion(text)
-  if (cleaned.length === 0 || shouldFilterSuggestion(cleaned)) {
-    // An empty or semantically rejectable reply is a normal "no suggestion"
-    // (the prompt tells the model to stay silent when the next step is not
-    // obvious), not a failure. Nothing reaches the log.
-    return undefined
-  }
-  const { text: suggestion, truncated } = sanitizeSuggestion(cleaned, config.maxSuggestionChars)
+    .join('\n')
+  // Parse the model's JSON array (fenced or not) into chip-safe candidates. An
+  // empty array or an all-filtered reply is a normal "no suggestion" (the
+  // prompt tells the model to answer [] when the next step is not obvious),
+  // not a failure.
+  const suggestions = parseSuggestionList(
+    text,
+    config.maxSuggestionChars,
+    config.maxSuggestions ?? 3,
+  )
+  if (suggestions.length === 0) return undefined
   return {
-    version: 1,
+    version: 2,
     turn,
     baseSeq: transcript.baseSeq,
-    text: suggestion,
-    truncated,
+    suggestions,
     route,
-    acceptKey: config.acceptKey ?? 'Tab',
   }
 }
