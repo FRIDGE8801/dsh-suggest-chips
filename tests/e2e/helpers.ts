@@ -197,10 +197,13 @@ export async function setSuggestionModel(page: Page, provider: string, model: st
   // The model control is a <select> only when the provider's catalog lists
   // explicit models; a provider without one (notably `deepseek-official` in a
   // cold isolated $DSH_HOME) degrades to a free-text input. Type into whichever
-  // shape rendered instead of assuming the dropdown.
+  // shape rendered instead of assuming the dropdown. The catalog arrives on a
+  // read the dialog issues *after* the provider changes, so the <select> can
+  // briefly hold only the empty "跟随会话路由" option — wait for the model.
   const modelControl = config.locator('#suggest-prompt-settings-model')
   await modelControl.waitFor({ timeout: 10_000 })
   if (await modelControl.evaluate(el => el.tagName.toLowerCase()) === 'select') {
+    await modelControl.locator(`option[value="${model}"]`).waitFor({ state: 'attached', timeout: 15_000 })
     await modelControl.selectOption(model)
   } else {
     await modelControl.fill(model)
@@ -212,10 +215,13 @@ export async function setSuggestionModel(page: Page, provider: string, model: st
   await config.getByRole('button', { name: '保存', exact: true }).click()
 
   // Saving does not leave the page. The composer is unreachable while a detail
-  // page is open, so click the crumb back to the list — its accessible name is
-  // the plugin-manager dictionary's `backToList` ("返回插件列表"), rendered as a
-  // `<button aria-label="返回插件列表">` at the top of every detail page.
-  await page.getByRole('button', { name: '返回插件列表' }).click()
+  // page is open, so click the crumb back to the list. Its copy is the
+  // plugin-manager dictionary's `backToList`, which read "返回插件列表" through
+  // dsh 0.2.0 and shortened to "返回插件" in 0.2.1; accept either so the lane
+  // tracks both. The anchored pattern keeps it from matching longer copy.
+  const backToList = page.getByRole('button', { name: /^返回插件(列表)?$/ })
+  await backToList.waitFor({ timeout: 15_000 })
+  await backToList.click()
   await page.locator('div[data-plugin-item-detail="suggest-prompt"]')
     .waitFor({ state: 'detached', timeout: 15_000 })
 

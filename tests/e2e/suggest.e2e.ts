@@ -45,9 +45,11 @@ const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 /**
  * Walk the first-run onboarding to store the DeepSeek credential through the UI.
  *
- * Dialog titles are asserted by their rc.2 copy: the preview notice became
- * 预览版说明 (`welcomeTitle`, previously 内测声明), while the credential step kept
- * 添加一个 API Key 开始使用 (`onboardingTitle`). These strings live in the
+ * Dialog titles are asserted by their copy: the preview notice is 预览版说明
+ * (`welcomeTitle`, previously 内测声明). Since `dsh 0.2.1`, the credential form is
+ * no longer the second step — an interstitial 开始使用 chooser (`startTitle`) now
+ * offers 登录 / 添加 API Key and must be answered first, and only then does
+ * 添加一个 API Key 开始使用 (`onboardingTitle`) mount. These strings live in the
  * harness's `ui-settings-models` locale dictionary and move with its releases.
  */
 async function configureKeyThroughOnboarding(page: Page, apiKey: string): Promise<void> {
@@ -55,6 +57,16 @@ async function configureKeyThroughOnboarding(page: Page, apiKey: string): Promis
   await welcome.waitFor({ timeout: 30_000 })
   await welcome.getByRole('button', { name: '继续' }).click()
   await welcome.waitFor({ state: 'detached', timeout: 15_000 })
+
+  // Interstitial sign-in chooser. It is absent on harness builds that go
+  // straight from the notice to the credential form, so tolerate its absence.
+  const chooser = page.getByRole('dialog', { name: '开始使用' })
+  const chooserAppeared = await chooser
+    .waitFor({ timeout: 15_000 })
+    .then(() => true, () => false)
+  if (chooserAppeared) {
+    await chooser.getByRole('button', { name: '添加 API Key' }).click()
+  }
 
   const credentialStep = page.getByRole('dialog', { name: '添加一个 API Key 开始使用' })
   await credentialStep.waitFor({ timeout: 15_000 })
