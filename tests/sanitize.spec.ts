@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hasCJK, redactSecrets, sanitizeSuggestion, shouldFilterSuggestion } from '../src/sanitize.ts'
+import { hasCJK, hasCyrillic, redactSecrets, sanitizeSuggestion, shouldFilterSuggestion } from '../src/sanitize.ts'
 
 describe('redactSecrets', () => {
   it('masks AWS, OpenAI, GitHub, Slack, JWT, and Stripe secret shapes', () => {
@@ -74,6 +74,16 @@ describe('hasCJK', () => {
     expect(hasCJK('mixed 中文 text')).toBe(true)
     expect(hasCJK('plain english')).toBe(false)
     expect(hasCJK('')).toBe(false)
+  })
+})
+
+describe('hasCyrillic', () => {
+  it('detects Cyrillic letters and ignores other scripts', () => {
+    expect(hasCyrillic('привет')).toBe(true)
+    expect(hasCyrillic('mixed привет text')).toBe(true)
+    expect(hasCyrillic('plain english')).toBe(false)
+    expect(hasCyrillic('继续')).toBe(false)
+    expect(hasCyrillic('')).toBe(false)
   })
 })
 

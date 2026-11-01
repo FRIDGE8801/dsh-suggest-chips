@@ -165,6 +165,22 @@ export function hasCJK(text: string): boolean {
   return false
 }
 
+/**
+ * Report whether `text` contains a Cyrillic letter. Cyrillic is a reliable
+ * signal that the conversation is in Russian (or another Cyrillic-script
+ * language), which the suggestion prompt must mirror instead of defaulting to
+ * English.
+ * @param text - inspected text.
+ * @returns true when any code point falls in the Cyrillic block.
+ */
+export function hasCyrillic(text: string): boolean {
+  for (const char of text) {
+    const code = char.charCodeAt(0)
+    if (code >= 0x0400 && code <= 0x04ff) return true
+  }
+  return false
+}
+
 /** Meta-text the model might emit instead of a suggestion ("stay silent"). */
 const SILENCE_META = /\bsilence\b|\bstay silent\b|\bno more\b/i
 

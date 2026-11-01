@@ -19,7 +19,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { deadline, MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { SuggestPromptStorageRecord } from './domain.ts'
-import { hasCJK, parseSuggestionList } from './sanitize.ts'
+import { hasCJK, hasCyrillic, parseSuggestionList } from './sanitize.ts'
 import type { SuggestPromptTranscriptState } from './types.ts'
 import type { Config } from './index.ts'
 
@@ -187,15 +187,24 @@ export function systemPrompt(maxSuggestionChars: number, language: string, maxSu
     '',
     `Reply with ONLY a JSON array of 2-${maxSuggestions} strings, 2-10 words each, no quotes beyond the JSON syntax, no explanation. Each candidate at most ${maxSuggestionChars} visible characters.`,
     '',
-    `Language: ${language}`,
+    `Language: ${language}. Every candidate MUST be written in exactly this language — the language the user is writing in. Never translate the user's words and never answer in another language.`,
   ].join('\n')
 }
 
-/** Pick the reply language to match the user's last prompt (CJK → 简体中文). */
+/**
+ * Pick the reply language from the conversation itself: the newest user
+ * message decides, so the chips always arrive in the language the user is
+ * actually writing. CJK → Simplified Chinese; Cyrillic → Russian; anything
+ * else falls back to English.
+ * @param pairs - the bounded transcript pairs of the completed turn.
+ * @returns the language name handed to the model.
+ */
 export function suggestionLanguage(pairs: readonly TranscriptPair[]): string {
   for (const pair of [...pairs].reverse()) {
     if (pair.role !== 'user') continue
-    return hasCJK(pair.text) ? '简体中文' : 'English'
+    if (hasCJK(pair.text)) return '简体中文'
+    if (hasCyrillic(pair.text)) return 'Russian'
+    return 'English'
   }
   return 'English'
 }

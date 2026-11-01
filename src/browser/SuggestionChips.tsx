@@ -6,6 +6,10 @@
  * row sends that prompt immediately: `setDraft(text)` followed by `submit()`,
  * i.e. the same path the send button takes — no synthetic key events.
  *
+ * Each row reveals a pencil on hover; it swaps the row for an inline input
+ * prefilled with the tip's text. Enter sends the edited prompt through the same
+ * setDraft/submit path, Escape or blur cancels and restores the chip.
+ *
  * The host stores each set under the turn whose completion produced it, so a
  * tail only ever renders the set for its own turn. Only the latest tail reads
  * the store: every completed turn has a tail, and mounting the poll in each
@@ -46,11 +50,23 @@ const CSS_TEXT = `
   order: 2;
   padding: 8px 0 50px;
 }
-.dsh-suggest-chip {
+.dsh-suggest-row {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
+  box-sizing: border-box;
+}
+.dsh-suggest-chip {
+  display: flex;
+  /* Shrink-to-fit: the chip hugs its own text so the pencil sits directly
+     after the words instead of being pushed to the row's right edge. It may
+     still shrink below content width, which is what lets long tips wrap. */
+  flex: 0 1 auto;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
   box-sizing: border-box;
   margin: 0;
   padding: 7px 12px;
@@ -76,6 +92,58 @@ const CSS_TEXT = `
 .dsh-suggest-text {
   min-width: 0;
 }
+/* The pencil stays invisible (but laid out, so revealing it never shifts the
+   text) until the row is hovered or holds focus; coarse pointers always see it. */
+.dsh-suggest-edit {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-quaternary, rgba(160, 160, 160, 0.55));
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
+}
+.dsh-suggest-row:hover .dsh-suggest-edit,
+.dsh-suggest-row:focus-within .dsh-suggest-edit {
+  opacity: 1;
+}
+.dsh-suggest-edit:hover,
+.dsh-suggest-edit:focus-visible {
+  outline: none;
+  color: var(--dsw-alias-label-primary, inherit);
+  color: color-mix(in srgb, var(--dsw-alias-label-primary, #ffffff) 85%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary, #ffffff) 8%, transparent);
+}
+.dsh-suggest-edit svg {
+  width: 14px;
+  height: 14px;
+}
+.dsh-suggest-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, #ffffff) 24%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary, #ffffff) 4%, transparent);
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.dsh-suggest-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dsw-alias-label-primary, #ffffff) 40%, transparent);
+}
 /* Hover lights up the words themselves; the row stays transparent. The
    color-mix line is a slightly muted primary, so the lift stays soft. */
 .dsh-suggest-chip:hover {
@@ -93,6 +161,7 @@ const CSS_TEXT = `
 }
 @media (pointer: coarse) {
   .dsh-suggest-chip { padding: 9px 12px; }
+  .dsh-suggest-edit { opacity: 1; }
 }
 `
 
@@ -162,6 +231,9 @@ function TurnSuggestions({ turn, useSession, useInput, inputActions, sessionId }
   const running = useSession(state => state.running)
   const phase = useInput(state => state.phase)
   const [sending, setSending] = useState<string | null>(null)
+  // Row being edited inline (index into `visible`) and its live text.
+  const [editing, setEditing] = useState<number | null>(null)
+  const [draft, setDraft] = useState('')
 
   // A failed send (the submit was refused) must not hide the chips forever.
   useEffect(() => {
@@ -186,6 +258,15 @@ function TurnSuggestions({ turn, useSession, useInput, inputActions, sessionId }
     }
   }, [])
 
+  // The store keeps its reference until the payload changes, so this fires on
+  // a new set (or on hiding), never on a poll tick — and a stale editor cannot
+  // survive into a different turn's chips. It must stay above the early return:
+  // the hook order may not depend on whether chips are visible.
+  useEffect(() => {
+    setEditing(null)
+    setDraft('')
+  }, [suggestion])
+
   const visible = sending === null
     ? visibleSuggestions(suggestion, running, phase)
     : EMPTY
@@ -200,33 +281,102 @@ function TurnSuggestions({ turn, useSession, useInput, inputActions, sessionId }
     queueMicrotask(() => { inputActions.submit() })
   }
 
+  const cancelEdit = (): void => {
+    setEditing(null)
+    setDraft('')
+  }
+
+  const commitEdit = (): void => {
+    const text = draft.trim()
+    // An emptied field keeps the editor open instead of sending nothing.
+    if (text === '') return
+    cancelEdit()
+    send(text)
+  }
+
   return (
     <div className="dsh-suggest-chips" data-suggest-chips="">
-      {visible.map(text => (
-        <button
-          key={text}
-          type="button"
-          className="dsh-suggest-chip"
-          onMouseDown={event => { event.preventDefault() }}
-          onClick={() => { send(text) }}
-        >
-          <svg
-            className="dsh-suggest-arrow"
-            viewBox="0 0 16 16"
-            fill="none"
-            aria-hidden="true"
-            focusable="false"
-          >
-            <path
-              d="M4.5 2.75v5.5a2 2 0 0 0 2 2h6M10.25 8.25 12.5 10.25l-2.25 2"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <span className="dsh-suggest-text">{text}</span>
-        </button>
+      {visible.map((text, index) => (
+        <div key={text} className="dsh-suggest-row">
+          {index === editing
+            ? (
+                <input
+                  className="dsh-suggest-input"
+                  value={draft}
+                  autoFocus
+                  spellCheck={false}
+                  aria-label="Edit suggestion"
+                  onChange={(event) => { setDraft(event.target.value) }}
+                  onKeyDown={(event) => {
+                    // An IME composition commits the character, not the prompt.
+                    if (event.nativeEvent.isComposing) return
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      commitEdit()
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault()
+                      cancelEdit()
+                    }
+                  }}
+                  onBlur={cancelEdit}
+                />
+              )
+            : (
+                <>
+                  <button
+                    type="button"
+                    className="dsh-suggest-chip"
+                    onMouseDown={(event) => { event.preventDefault() }}
+                    onClick={() => { send(text) }}
+                  >
+                    <svg
+                      className="dsh-suggest-arrow"
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <path
+                        d="M4.5 2.75v5.5a2 2 0 0 0 2 2h6M10.25 8.25 12.5 10.25l-2.25 2"
+                        stroke="currentColor"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="dsh-suggest-text">{text}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dsh-suggest-edit"
+                    aria-label="Edit suggestion"
+                    title="Edit suggestion"
+                    onMouseDown={(event) => { event.preventDefault() }}
+                    onClick={() => { setEditing(index); setDraft(text) }}
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <path
+                        d="M9.6 2.9a1.5 1.5 0 0 1 2.1 0l1.4 1.4a1.5 1.5 0 0 1 0 2.1l-7 7L3 14l.6-3.1 7-7Z"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="m8.7 3.8 3.5 3.5"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                </>
+              )}
+        </div>
       ))}
     </div>
   )

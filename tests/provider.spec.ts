@@ -323,6 +323,26 @@ describe('suggestionLanguage', () => {
     ])).toBe('English')
     expect(suggestionLanguage([{ role: 'assistant', text: 'hello' }])).toBe('English')
   })
+
+  it('answers a Cyrillic conversation in Russian, not English', () => {
+    expect(suggestionLanguage([
+      { role: 'user', text: 'починить тесты' },
+      { role: 'assistant', text: 'готово' },
+    ])).toBe('Russian')
+  })
+
+  it('lets the newest user message decide, not an older one', () => {
+    expect(suggestionLanguage([
+      { role: 'user', text: 'fix the bug' },
+      { role: 'assistant', text: 'done' },
+      { role: 'user', text: 'покажи diff' },
+    ])).toBe('Russian')
+    expect(suggestionLanguage([
+      { role: 'user', text: 'покажи diff' },
+      { role: 'assistant', text: 'вот' },
+      { role: 'user', text: 'now commit it' },
+    ])).toBe('English')
+  })
 })
 
 describe('buildTranscript', () => {

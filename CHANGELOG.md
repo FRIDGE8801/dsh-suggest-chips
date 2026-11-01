@@ -14,8 +14,29 @@ version it targets.
 
 ## [Unreleased]
 
+### Added
+
+- **Edit a tip before sending.** Hovering a chip reveals a pencil that swaps the
+  row for an inline single-line editor prefilled with the tip (always visible on
+  coarse pointers). Enter sends the edited prompt through the same
+  `setDraft`/`submit` path as a chip click; Escape or blur cancels and restores
+  the chip. An emptied field sends nothing.
+
 ### Changed
 
+- **Chips are written in the language of the conversation, whatever it is.**
+  `suggestionLanguage` used to know two outcomes — CJK → Simplified Chinese,
+  otherwise English — so a conversation in any other language (Russian, for
+  one) got English tips. It now reads the newest user message for script:
+  CJK yields `简体中文`, Cyrillic yields `Russian`, anything else falls back to
+  English, and the prompt states the requirement as a hard constraint instead of
+  a bare label: every candidate must be written in the user's own language,
+  never translated.
+- **The pencil sits directly after the tip's text** instead of at the row's far
+  right edge. `.dsh-suggest-chip` no longer grows to fill the row
+  (`flex: 1 1 auto` → `flex: 0 1 auto`, plus `max-width: 100%`), so the chip hugs
+  its own words and the hover-revealed pencil follows immediately, while long
+  tips still wrap.
 - Chips stay visible while the composer has text and are retired only after the
   message is sent (the submission phase leaves `plain`). Starting a reply no
   longer discards the tips, so the user can change their mind and still click
